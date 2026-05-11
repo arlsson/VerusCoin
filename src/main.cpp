@@ -6618,6 +6618,32 @@ bool ContextualCheckBlockHeader(
         return state.Invalid(error("%s : rejected nVersion<4 block", __func__),
                              REJECT_OBSOLETE, "bad-version");
 
+    if (block.IsVerusPOSBlock())
+    {
+        uint32_t calcPOSTarget = lwmaGetNextPOSRequired(pindexPrev, Params().GetConsensus());
+        if (block.GetVerusPOSTarget() != calcPOSTarget ||
+            calcPOSTarget == 0)
+        {
+            // if either the header has an invalid POS difficulty or we cannot have a POS block here, return error
+            return state.DoS(100, error("%s: incorrect proof of stake header", __func__), REJECT_INVALID, "bad-stake");
+        }
+    }
+    else
+    {
+        if (!CheckProofOfWork(block, nHeight, Params().GetConsensus()))
+        {
+            return state.DoS(100, error("%s: incorrect proof of work header", __func__), REJECT_INVALID, "bad-work");
+        }
+
+        // tolerate variable size solutions, but ensure that we have at least 16 bytes extra space to fit the clhash at the end
+        int modSpace = GetSerializeSize(block, SER_NETWORK, PROTOCOL_VERSION) % 32;
+        int solutionVer = CConstVerusSolutionVector::GetVersionByHeight(nHeight);
+        if (!(solutionVer < CActivationHeight::ACTIVATE_VERUSHASH2_1 || (modSpace >= 1 && modSpace <= 16)))
+        {
+            return state.DoS(100, error("%s: invalid header format", __func__), REJECT_INVALID, "insufficient-extraspace");
+        }
+    }
+
     return true;
 }
 
