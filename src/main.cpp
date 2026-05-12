@@ -955,7 +955,7 @@ bool CheckFinalTx(const CTransaction &tx, int flags)
     // However this changes once median past time-locks are enforced:
     const int64_t nBlockTime = (flags & LOCKTIME_MEDIAN_TIME_PAST)
     ? chainActive.Tip()->GetMedianTimePast()
-    : GetAdjustedTime();
+    : GetTime();
 
     return IsFinalTx(tx, nBlockHeight, nBlockTime);
 }
@@ -3754,7 +3754,7 @@ void PartitionCheck(bool (*initialDownloadCheck)(const CChainParams&),
     if (bestHeader == NULL || initialDownloadCheck(Params())) return;
 
     static int64_t lastAlertTime = 0;
-    int64_t now = GetAdjustedTime();
+    int64_t now = GetTime();
     if (lastAlertTime > now-60*60*24) return; // Alert at most once per day
 
     const int SPAN_HOURS=4;
@@ -3769,7 +3769,7 @@ void PartitionCheck(bool (*initialDownloadCheck)(const CChainParams&),
     boost::math::poisson_distribution<double> poisson(BLOCKS_EXPECTED);
 
     std::string strWarning;
-    int64_t startTime = GetAdjustedTime()-SPAN_SECONDS;
+    int64_t startTime = GetTime()-SPAN_SECONDS;
     const CBlockIndex* i = bestHeader;
     int nBlocks = 0;
     while (i->GetBlockTime() >= startTime) {
@@ -6386,22 +6386,22 @@ bool CheckBlockHeader(int32_t *futureblockp, int32_t height, CBlockIndex *pindex
         }
     }
     *futureblockp = 0;
-    if (blockhdr.GetBlockTime() > GetAdjustedTime() + 60)
+    if (blockhdr.GetBlockTime() > GetTime() + 60)
     {
         CBlockIndex *tipindex;
         //fprintf(stderr,"ht.%d future block %u vs time.%u + 60\n",height,(uint32_t)blockhdr.GetBlockTime(),(uint32_t)GetAdjustedTime());
-        if ( (tipindex= chainActive.Tip()) != 0 && tipindex->GetBlockHash() == blockhdr.hashPrevBlock && blockhdr.GetBlockTime() < GetAdjustedTime() + 60 + 5 )
+        if ( (tipindex= chainActive.Tip()) != 0 && tipindex->GetBlockHash() == blockhdr.hashPrevBlock && blockhdr.GetBlockTime() < GetTime() + 60 + 5 )
         {
             //fprintf(stderr,"it is the next block, let's wait for %d seconds\n",GetAdjustedTime() + 60 - blockhdr.GetBlockTime());
-            while ( blockhdr.GetBlockTime() > GetAdjustedTime() + 60 )
+            while ( blockhdr.GetBlockTime() > GetTime() + 60 )
                 sleep(1);
             //fprintf(stderr,"now its valid\n");
         }
         else
         {
-            if (blockhdr.GetBlockTime() < GetAdjustedTime() + 600)
+            if (blockhdr.GetBlockTime() < GetTime() + 600)
                 *futureblockp = 1;
-            //LogPrintf("CheckBlockHeader block from future %d error",blockhdr.GetBlockTime() - GetAdjustedTime());
+            //LogPrintf("CheckBlockHeader block from future %d error",blockhdr.GetBlockTime() - GetTime());
             return false; //state.Invalid(error("CheckBlockHeader(): block timestamp too far in the future"),REJECT_INVALID, "time-too-new");
         }
     }
@@ -6417,7 +6417,7 @@ bool CheckBlockHeader(int32_t *futureblockp, int32_t height, CBlockIndex *pindex
     }
 
     // Check timestamp
-    if (blockhdr.GetBlockTime() > GetAdjustedTime() + 2 * 60 * 60)
+    if (blockhdr.GetBlockTime() > GetTime() + 2 * 60 * 60)
         return state.Invalid(error("CheckBlockHeader(): block timestamp too far in the future"),
                              REJECT_INVALID, "time-too-new");
 
@@ -6560,7 +6560,7 @@ bool ContextualCheckBlockHeader(
     }
 
     // Check that timestamp is not too far in the future
-    if (block.GetBlockTime() > GetAdjustedTime() + consensusParams.nMaxFutureBlockTime)
+    if (block.GetBlockTime() > GetTime() + consensusParams.nMaxFutureBlockTime)
     {
         return state.Invalid(error("%s: block timestamp too far in the future", __func__),
                         REJECT_INVALID, "time-too-new");
@@ -6757,7 +6757,7 @@ bool ContextualCheckBlock(
             return state.DoS(10, error("%s: attempt to submit block with staking transaction that is not staking", __func__), REJECT_INVALID, "bad-txns-staking");
         }
 
-        int nLockTimeFlags = 0;
+        int nLockTimeFlags = STANDARD_LOCKTIME_VERIFY_FLAGS;
         int64_t nLockTimeCutoff = (nLockTimeFlags & LOCKTIME_MEDIAN_TIME_PAST)
         ? pindexPrev->GetMedianTimePast()
         : block.GetBlockTime();
@@ -6829,8 +6829,8 @@ static bool AcceptBlockHeader(int32_t *futureblockp,const CBlockHeader& block, C
         if (mi == mapBlockIndex.end())
         {
             LogPrintf("AcceptBlockHeader hashPrevBlock %s not found\n",block.hashPrevBlock.ToString().c_str());
-            return(false);
-            //return state.DoS(10, error("%s: prev block not found", __func__), 0, "bad-prevblk");
+            //return(false);
+            return state.DoS(1, error("%s: prev block not found", __func__), 0, "bad-prevblk");
         }
         pindexPrev = (*mi).second;
         if (pindexPrev == 0 )
@@ -8748,7 +8748,10 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, 
 
         int64_t nTimeOffset = nTime - GetTime();
         pfrom->nTimeOffset = nTimeOffset;
-        AddTimeData(pfrom->addr, nTimeOffset);
+        if (!pfrom->fInbound)
+        {
+            AddTimeData(pfrom->addr, nTimeOffset);
+        }
     }
 
 
