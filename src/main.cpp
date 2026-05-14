@@ -6624,7 +6624,12 @@ bool ContextualCheckBlockHeader(
         if (block.GetVerusPOSTarget() != calcPOSTarget ||
             calcPOSTarget == 0)
         {
+            arith_uint256 calcPOS, blockPOS;
+            calcPOS.GetCompact(calcPOSTarget);
+            blockPOS.GetCompact(block.GetVerusPOSTarget());
             // if either the header has an invalid POS difficulty or we cannot have a POS block here, return error
+            LogPrint("stakeheadercheck","Block for height %u\nBlock's POS target: %s\nCalc'ed POS target: %s\n",
+                                                            nHeight, ArithToUint256(blockPOS).GetHex().c_str(), ArithToUint256(calcPOS).GetHex().c_str());
             return state.DoS(100, error("%s: incorrect proof of stake header", __func__), REJECT_INVALID, "bad-stake");
         }
     }
