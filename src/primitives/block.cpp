@@ -582,7 +582,7 @@ CDefaultMMRNode CBlock::GetMMRNode(int index) const
             return CDefaultMMRNode(uint256());
         }
     }
-    return vtx[index].GetDefaultMMRNode();
+    return vtx[index].GetDefaultMMRNode(HasCappedTransactionMap());
 }
 
 
@@ -600,7 +600,7 @@ BlockMMRange CBlock::BuildBlockMMRTree(const uint256 &entropyHash) const
     BlockMMRange mmRange(BlockMMRNodeLayer(*this));
     for (auto &tx : vtx)
     {
-        mmRange.Add(tx.GetDefaultMMRNode());
+        mmRange.Add(tx.GetDefaultMMRNode(HasCappedTransactionMap()));
     }
 
     if (IsAdvancedHeader() != 0)
@@ -629,33 +629,30 @@ CPartialTransactionProof CBlock::GetPartialTransactionProof(const CTransaction &
 
     if (IsAdvancedHeader() != 0 && partIndexes.size())
     {
-        // make a partial transaction proof for the export opret only
         BlockMMRange blockMMR(GetBlockMMRTree(entropyHash));
         BlockMMView blockMMV(blockMMR);
         CMMRProof txProof;
-
         if (!blockMMV.GetProof(txProof, txIndex))
         {
             LogPrintf("%s: Cannot make transaction proof in block\n", __func__);
             printf("%s: Cannot make transaction proof in block\n", __func__);
-            return CPartialTransactionProof();
+            return CPartialTransactionProof(CPartialTransactionProof::VERSION_INVALID);
         }
 
-        CTransactionMap txMap(tx);
-        TransactionMMView txMMV(txMap.transactionMMR);
+        CTransactionMap txMap(tx, HasCappedTransactionMap());
 
         for (auto &partIdx : partIndexes)
         {
-            components.push_back(CTransactionComponentProof(txMMV, txMap, tx, partIdx.first, partIdx.second));
+            components.push_back(txMap.GetComponentProof(tx, partIdx.first, partIdx.second));
         }
 
-        return CPartialTransactionProof(txProof, components);
-    }
+        return CPartialTransactionProof(txProof, components, PartialTransactionProofVersion());
+     }
     else
     {
         // make a proof of the whole transaction
         CMMRProof exportProof = CMMRProof() << CBTCMerkleBranch(txIndex, GetMerkleBranch(txIndex));
-        return CPartialTransactionProof(exportProof, tx);
+        return CPartialTransactionProof(exportProof, tx, (int8_t)PartialTransactionProofVersion());
     }
 }
 

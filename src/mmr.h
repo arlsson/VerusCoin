@@ -602,6 +602,9 @@ typedef CPATRICIABranch<> CETHPATRICIABranch;
 
 class RLP {
 public:
+    enum {
+        MAX_RLP_DECODE_DEPTH = 32
+    };
     struct rlpDecoded {
         std::vector<std::vector<unsigned char>> data;
         std::vector<unsigned char> remainder; 
@@ -612,7 +615,7 @@ public:
     std::vector<unsigned char> encodeLength_deprecated(int length,int offset);
     std::vector<unsigned char> encode(std::vector<unsigned char> input);
     std::vector<unsigned char> encode(std::vector<std::vector<unsigned char>> input);
-    rlpDecoded decode(std::vector<unsigned char> inputBytes);
+    rlpDecoded decode(std::vector<unsigned char> inputBytes, int depth=0);
     rlpDecoded decode(std::string inputString);
 };
 
@@ -1368,7 +1371,7 @@ public:
         // printf("GetProofBits - pos: %lu, mmvSize: %lu\n", pos, mmvSize);
 
         // find a path from the indicated position to the root in the current view
-        if (pos > 0 && pos < mmvSize)
+        if (pos >= 0 && pos < mmvSize)
         {
             int extrahashes = NODE_TYPE::GetExtraHashCount();
 

@@ -65,6 +65,8 @@ static const uint32_t PBAAS_ALLCHAINS_NOTARIZATION_FIX_TESTNET_UPGRADE = 1741798
 static const uint32_t PBAAS_STRICT_PRECONVERT_HEIGHT = 3931100;
 static const uint32_t PBAAS_REFUND_KAIJU_HEIGHT1 = 3448493;
 static const uint32_t PBAAS_REFUND_KAIJU_HEIGHT2 = 3448519;
+static const uint32_t PBAAS_ENHANCED_UNDERFLOW_HEIGHT = 3761890;
+static const uint32_t PBAAS_ENHANCED_UNDERFLOW_TEST_HEIGHT = 1134500;
 
 class CUpgradeDescriptor
 {
@@ -1260,6 +1262,7 @@ public:
     bool CrossChainPBaaSProofFix(const uint160 &sysID, uint32_t height) const;
     bool BlockOneIDUpgrade() const;
     bool IsPromoteExchangeRate(uint32_t height) const;
+    bool IsEnhancedUnderflowCheck(uint32_t height) const;
     int CheckPastRealTime(uint32_t nTime, int64_t height=0) const;
     bool IsUpgrade01Active(int64_t height=0) const;
     bool IsUpgrade02Active(int64_t height=0) const;
@@ -1408,6 +1411,30 @@ public:
     {
         static uint160 nameSpace;
         static uint160 key = CVDXF_Data::GetDataKey(DisablePBaaSCrossChainKeyName(), nameSpace);
+        return key;
+    }
+
+    static std::string DisableEarnedNotarizationKeyName()
+    {
+        return "vrsc::system.upgradedata.disableearnednotarizations";
+    }
+
+    static uint160 DisableEarnedNotarizationKey()
+    {
+        static uint160 nameSpace;
+        static uint160 key = CVDXF_Data::GetDataKey(DisableEarnedNotarizationKeyName(), nameSpace);
+        return key;
+    }
+
+    static std::string BridgeCleanupWindowClosedKeyName()
+    {
+        return "vrsc::system.upgradedata.bridgecleanupwindowclosed";
+    }
+
+    static uint160 BridgeCleanupWindowClosedKey()
+    {
+        static uint160 nameSpace;
+        static uint160 key = CVDXF_Data::GetDataKey(BridgeCleanupWindowClosedKeyName(), nameSpace);
         return key;
     }
 
@@ -1561,9 +1588,6 @@ CTxOut MakeCC1of2Vout(uint8_t evalcode, CAmount nValue, CPubKey pk1, CPubKey pk2
     vout.scriptPubKey << vParams.AsVector() << OP_DROP;
     return(vout);
 }
-
-bool IsVerusActive();
-bool IsVerusMainnetActive();
 
 bool IsValidExportCurrency(const CCurrencyDefinition &systemDest, const uint160 &exportCurrencyID, uint32_t height);
 std::set<uint160> BaseBridgeCurrencies(const CCurrencyDefinition &systemDest, uint32_t height, bool feeOnly=false);

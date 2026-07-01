@@ -294,11 +294,11 @@ CPartialTransactionProof CChain::GetPreHeaderProof(const CBlock &block, uint32_t
         {
             LogPrintf("substitutedPreHeader: %s\n", substitutedPreHeader.ToUniValue().write(1,2).c_str());
         }
-        return CPartialTransactionProof(txProof, substitutedPreHeader);
+        return CPartialTransactionProof(txProof, substitutedPreHeader, block.PartialTransactionProofVersion());
     }
     else
     {
-        return CPartialTransactionProof(txProof, block.GetSubstitutedPreHeader(entropyHash));
+        return CPartialTransactionProof(txProof, block.GetSubstitutedPreHeader(entropyHash), block.PartialTransactionProofVersion());
     }
 }
 

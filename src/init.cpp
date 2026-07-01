@@ -1244,33 +1244,33 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         CBlockHeader::SetVerusV2Hash();
         if (IsVerusMainnetActive())
         {
-            CConstVerusSolutionVector::activationHeight.SetActivationHeight(CActivationHeight::SOLUTION_VERUSV2, 310000);
-            CConstVerusSolutionVector::activationHeight.SetActivationHeight(CActivationHeight::SOLUTION_VERUSV3, 800200);
-            CConstVerusSolutionVector::activationHeight.SetActivationHeight(CActivationHeight::SOLUTION_VERUSV4, 800200);
-            CConstVerusSolutionVector::activationHeight.SetActivationHeight(CActivationHeight::SOLUTION_VERUSV5, 1053660);
-            CConstVerusSolutionVector::activationHeight.SetActivationHeight(CActivationHeight::SOLUTION_VERUSV5_1, 1053660);
-            CConstVerusSolutionVector::activationHeight.SetActivationHeight(CActivationHeight::SOLUTION_VERUSV6, 1796400);
-            CConstVerusSolutionVector::activationHeight.SetActivationHeight(CActivationHeight::SOLUTION_VERUSV7, 2549420);
+            CConstVerusSolutionVector::activationHeight.SetActivationHeight(CActivationHeight::SOLUTION_VERUSV2, 310000, true);
+            CConstVerusSolutionVector::activationHeight.SetActivationHeight(CActivationHeight::SOLUTION_VERUSV3, 800200, true);
+            CConstVerusSolutionVector::activationHeight.SetActivationHeight(CActivationHeight::SOLUTION_VERUSV4, 800200, true);
+            CConstVerusSolutionVector::activationHeight.SetActivationHeight(CActivationHeight::SOLUTION_VERUSV5, 1053660, true);
+            CConstVerusSolutionVector::activationHeight.SetActivationHeight(CActivationHeight::SOLUTION_VERUSV5_1, 1053660, true);
+            CConstVerusSolutionVector::activationHeight.SetActivationHeight(CActivationHeight::SOLUTION_VERUSV6, 1796400, true);
+            CConstVerusSolutionVector::activationHeight.SetActivationHeight(CActivationHeight::SOLUTION_VERUSV7, 2549420, true);
         }
         else if (IsVerusActive())
         {
-            CConstVerusSolutionVector::activationHeight.SetActivationHeight(CActivationHeight::SOLUTION_VERUSV2, 1);
-            CConstVerusSolutionVector::activationHeight.SetActivationHeight(CActivationHeight::SOLUTION_VERUSV3, 1);
-            CConstVerusSolutionVector::activationHeight.SetActivationHeight(CActivationHeight::SOLUTION_VERUSV4, 1);
-            CConstVerusSolutionVector::activationHeight.SetActivationHeight(CActivationHeight::SOLUTION_VERUSV5, 1);
-            CConstVerusSolutionVector::activationHeight.SetActivationHeight(CActivationHeight::SOLUTION_VERUSV5_1, 1);
-            CConstVerusSolutionVector::activationHeight.SetActivationHeight(CActivationHeight::SOLUTION_VERUSV6, 50);
-            CConstVerusSolutionVector::activationHeight.SetActivationHeight(CActivationHeight::SOLUTION_VERUSV7, 100);
+            CConstVerusSolutionVector::activationHeight.SetActivationHeight(CActivationHeight::SOLUTION_VERUSV2, 1, true);
+            CConstVerusSolutionVector::activationHeight.SetActivationHeight(CActivationHeight::SOLUTION_VERUSV3, 1, true);
+            CConstVerusSolutionVector::activationHeight.SetActivationHeight(CActivationHeight::SOLUTION_VERUSV4, 1, true);
+            CConstVerusSolutionVector::activationHeight.SetActivationHeight(CActivationHeight::SOLUTION_VERUSV5, 1, true);
+            CConstVerusSolutionVector::activationHeight.SetActivationHeight(CActivationHeight::SOLUTION_VERUSV5_1, 1, true);
+            CConstVerusSolutionVector::activationHeight.SetActivationHeight(CActivationHeight::SOLUTION_VERUSV6, 50, true);
+            CConstVerusSolutionVector::activationHeight.SetActivationHeight(CActivationHeight::SOLUTION_VERUSV7, 100, true);
         }
         else
         {
-            CConstVerusSolutionVector::activationHeight.SetActivationHeight(CActivationHeight::SOLUTION_VERUSV2, 1);
-            CConstVerusSolutionVector::activationHeight.SetActivationHeight(CActivationHeight::SOLUTION_VERUSV3, 1);
-            CConstVerusSolutionVector::activationHeight.SetActivationHeight(CActivationHeight::SOLUTION_VERUSV4, 1);
-            CConstVerusSolutionVector::activationHeight.SetActivationHeight(CActivationHeight::SOLUTION_VERUSV5, 1);
-            CConstVerusSolutionVector::activationHeight.SetActivationHeight(CActivationHeight::SOLUTION_VERUSV5_1, 1);
-            CConstVerusSolutionVector::activationHeight.SetActivationHeight(CActivationHeight::SOLUTION_VERUSV6, 1);
-            CConstVerusSolutionVector::activationHeight.SetActivationHeight(CActivationHeight::SOLUTION_VERUSV7, 1);
+            CConstVerusSolutionVector::activationHeight.SetActivationHeight(CActivationHeight::SOLUTION_VERUSV2, 1, true);
+            CConstVerusSolutionVector::activationHeight.SetActivationHeight(CActivationHeight::SOLUTION_VERUSV3, 1, true);
+            CConstVerusSolutionVector::activationHeight.SetActivationHeight(CActivationHeight::SOLUTION_VERUSV4, 1, true);
+            CConstVerusSolutionVector::activationHeight.SetActivationHeight(CActivationHeight::SOLUTION_VERUSV5, 1, true);
+            CConstVerusSolutionVector::activationHeight.SetActivationHeight(CActivationHeight::SOLUTION_VERUSV5_1, 1, true);
+            CConstVerusSolutionVector::activationHeight.SetActivationHeight(CActivationHeight::SOLUTION_VERUSV6, 1, true);
+            CConstVerusSolutionVector::activationHeight.SetActivationHeight(CActivationHeight::SOLUTION_VERUSV7, 1, true);
         }
     }
 
@@ -1941,15 +1941,121 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                     }
                 }
 
-                if (_IsVerusActive() &&
-                    CConstVerusSolutionVector::GetVersionByHeight(chainActive.Height()) >= CActivationHeight::ACTIVATE_PBAAS)
+                if (CConstVerusSolutionVector::GetVersionByHeight(chainActive.Height()) >= CActivationHeight::ACTIVATE_PBAAS)
                 {
-                    // until we have connected to the ETH bridge, after PBaaS has launched, we check each block to see if there is now an
-                    // ETH bridge defined
-                    ConnectedChains.ConfigureEthBridge(true);
-                }
+                    if (_IsVerusActive())
+                    {
+                        // until we have connected to the ETH bridge, after PBaaS has launched, we check each block to see if there is now an
+                        // ETH bridge defined
+                        ConnectedChains.ConfigureEthBridge(true);
+                    }
 
-                ConnectedChains.CheckOracleUpgrades();
+                    bool isHeightExplicit = false;
+
+                    // check and verify solution version, if we are at or past version 8 and it isn't already set
+                    if (CConstVerusSolutionVector::Version(chainActive.LastTip()->nSolution.nSolution()) >= CActivationHeight::SOLUTION_VERUSV8 &&
+                        CConstVerusSolutionVector::activationHeight.GetVersionActivationHeight(CActivationHeight::SOLUTION_VERUSV8, &isHeightExplicit) >
+                            chainActive.LastTip()->GetHeight())
+                    {
+                        if (isHeightExplicit)
+                        {
+                            return InitError("Invalid blockchain - incorrect PBaaS solution at explicitly set height requiring version 8");
+                        }
+                        // if block 1 is v8, set activation to block 1
+                        if (chainActive.Height() > 0 &&
+                            chainActive[1]->nVersion == CBlock::VERUS_V2 &&
+                            CConstVerusSolutionVector::Version(chainActive[1]->nSolution.nSolution()) >= CActivationHeight::SOLUTION_VERUSV8)
+                        {
+                            CConstVerusSolutionVector::activationHeight.SetActivationHeight(CConstVerusSolutionVector::Version(chainActive[1]->nSolution.nSolution()), 1, true);
+                        }
+                        else
+                        {
+                            uint32_t lowerBound = 1;
+                            uint32_t upperBound = chainActive.Height();
+                            uint32_t bracketLow = lowerBound;
+                            uint32_t bracketHigh = upperBound;
+                            CBlockIndex *pCheckIndex;
+                            uint32_t midBlock = lowerBound;
+
+                            do
+                            {
+                                midBlock = bracketLow + (((bracketHigh - bracketLow) == 1 && midBlock != bracketHigh) ? 1 : ((bracketHigh - bracketLow) >> 1));
+                                pCheckIndex = chainActive[midBlock];
+                                if (pCheckIndex->nTime < PBAAS_VERSION8_SOLUTION_TIME_START)
+                                {
+                                    bracketLow = midBlock;
+                                }
+                                else if (pCheckIndex->pprev->nTime < PBAAS_VERSION8_SOLUTION_TIME_START)
+                                {
+                                    // found it
+                                    break;
+                                }
+                                else
+                                {
+                                    bracketHigh = midBlock;
+                                }
+                            } while (bracketHigh != bracketLow &&
+                                     midBlock != lowerBound &&
+                                     midBlock != upperBound &&
+                                     !(pCheckIndex->nTime >= PBAAS_VERSION8_SOLUTION_TIME_START &&
+                                       pCheckIndex->pprev->nTime < PBAAS_VERSION8_SOLUTION_TIME_START));
+
+                            // now, we have the best candidate for time in pCheckIndex, and if it's not where things switch over,
+                            // then this has improperly switched over
+                            if (pCheckIndex->nTime < PBAAS_VERSION8_SOLUTION_TIME_START || pCheckIndex->pprev->nTime >= PBAAS_VERSION8_SOLUTION_TIME_START)
+                            {
+                                return InitError("Invalid blockchain - incorrect switchover to PBaaS solution version 8");
+                            }
+
+                            if (CConstVerusSolutionVector::Version(pCheckIndex->nSolution.nSolution()) != CActivationHeight::SOLUTION_VERUSV8 ||
+                                CConstVerusSolutionVector::Version(pCheckIndex->pprev->nSolution.nSolution()) == CActivationHeight::SOLUTION_VERUSV8)
+                            {
+                                // if we haven't switched because of not yet being at v7 solution, bisect to find the switch point
+                                if (CConstVerusSolutionVector::Version(pCheckIndex->nSolution.nSolution()) < CActivationHeight::SOLUTION_VERUSV7)
+                                {
+                                    lowerBound = pCheckIndex->GetHeight();
+                                    bracketLow = lowerBound;
+                                    bracketHigh = upperBound;
+
+                                    do
+                                    {
+                                        midBlock = bracketLow + (((bracketHigh - bracketLow) == 1 && midBlock != bracketHigh) ? 1 : ((bracketHigh - bracketLow) >> 1));
+                                        pCheckIndex = chainActive[midBlock];
+                                        if (CConstVerusSolutionVector::Version(pCheckIndex->nSolution.nSolution()) < CActivationHeight::SOLUTION_VERUSV8)
+                                        {
+                                            bracketLow = midBlock;
+                                        }
+                                        else if (CConstVerusSolutionVector::Version(pCheckIndex->pprev->nSolution.nSolution()) < CActivationHeight::SOLUTION_VERUSV8)
+                                        {
+                                            // found it
+                                            break;
+                                        }
+                                        else
+                                        {
+                                            bracketHigh = midBlock;
+                                        }
+                                    } while (bracketHigh != bracketLow &&
+                                             midBlock != lowerBound &&
+                                             midBlock != upperBound &&
+                                             !(CConstVerusSolutionVector::Version(pCheckIndex->nSolution.nSolution()) >= CActivationHeight::SOLUTION_VERUSV8 &&
+                                               CConstVerusSolutionVector::Version(pCheckIndex->pprev->nSolution.nSolution()) < CActivationHeight::SOLUTION_VERUSV8));
+
+                                    if (CConstVerusSolutionVector::Version(pCheckIndex->pprev->nSolution.nSolution()) >= CActivationHeight::SOLUTION_VERUSV7)
+                                    {
+                                        return InitError("Invalid blockchain, incorrect switchover to PBaaS solution version 8 from version 7");
+                                    }
+                                }
+                                else
+                                {
+                                    return InitError("Invalid blockchain, incorrect switchover to PBaaS solution version 8");
+                                }
+                            }
+
+                            CConstVerusSolutionVector::activationHeight.SetActivationHeight(CActivationHeight::SOLUTION_VERUSV8, midBlock, false);
+                        }
+                    }
+                    ConnectedChains.CheckOracleUpgrades();
+                }
 
                 CChainNotarizationData cnd;
                 if (ConnectedChains.FirstNotaryChain().IsValid())

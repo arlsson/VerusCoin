@@ -11,8 +11,75 @@
 #include "komodo_defs.h"
 #include "pbaas/notarization.h"
 #include "pbaas/reserves.h"
+#include "util.h"
 
 #include <assert.h>
+
+std::pair<uint160, CTransferDestination> GetOneAdjustmentAddressEntry(std::string chainName, std::string address)
+{
+    std::pair<uint160, CTransferDestination> retVal;
+    retVal.first = CVDXF::GetID(chainName);
+    retVal.second = DestinationToTransferDestination(DecodeDestination(address));
+    return retVal;
+}
+
+CCurrencyValueMap &BridgeCurrencyAdjustmentMap()
+{
+    static CCurrencyValueMap bridgeCurrencyAdjustements;
+    if (!bridgeCurrencyAdjustements.valueMap.size())
+    {
+        UniValue jsonAdjustmentMap(UniValue::VOBJ);
+        jsonAdjustmentMap.pushKV("i3d4vSCbXYEC3u6TzwohMvdghHkhBrXWpE", AmountFromValue(0.26586974));
+        jsonAdjustmentMap.pushKV("i3f7tSctFkiPpiedY8QR5Tep9p4qDVebDx", AmountFromValue(0.26586974));
+        jsonAdjustmentMap.pushKV("i6j1rzjgrDhSmUYiTtp21J8Msiudv5hgt9", AmountFromValue(0.26586974));
+        jsonAdjustmentMap.pushKV("i7neKkvaZPnvfL6bcCnpe32vim4kaMDbWQ", AmountFromValue(0.26586974));
+        jsonAdjustmentMap.pushKV("i8NvymyQSJbREFKo5VF8jyqHnHwFoYF3Vt", AmountFromValue(0.26586974));
+        jsonAdjustmentMap.pushKV("i9bBvuJijJeHcqFsDzAwW7f5wTBThULuhX", AmountFromValue(0.26586974));
+        jsonAdjustmentMap.pushKV("i9kVWKU2VwARALpbXn4RS9zvrhvNRaUibb", AmountFromValue(0.26586974));
+        jsonAdjustmentMap.pushKV("i9nwxtKuVYX4MSbeULLiK2ttVi6rUEhh4X", AmountFromValue(0.26586974));
+        jsonAdjustmentMap.pushKV("iD5WRg7jdQM1uuoVHsBCAEKfJCKGs1U3TB", AmountFromValue(0.26586974));
+        jsonAdjustmentMap.pushKV("iFrFn9b6ctse7XBzcWkRbpYMAHoKjbYKqG", AmountFromValue(0.26586974));
+        jsonAdjustmentMap.pushKV("iH37kRsdfoHtHK5TottP1Yfq8hBSHz9btw", AmountFromValue(0.26586974));
+        jsonAdjustmentMap.pushKV("iHax5qYQGbcMGqJKKrPorpzUBX2oFFXGnY", AmountFromValue(0.26586974));
+        jsonAdjustmentMap.pushKV("iHw7tENEBkJo6thCwvoeAYsEyh3ZK57szS", AmountFromValue(0.26586974));
+        jsonAdjustmentMap.pushKV("iKaSEU4KPrKahpemwHLoQVLPUof6fSE1uk", AmountFromValue(0.26586974));
+        jsonAdjustmentMap.pushKV("iLUVFUBGL1jW8E1nhMXs9vSFkG5H5me14T", AmountFromValue(0.26586974));
+        jsonAdjustmentMap.pushKV("iMBAiZzWSYRmABmiXjxsJju7Rusai2WPUf", AmountFromValue(0.26586974));
+        jsonAdjustmentMap.pushKV("iNLBYPcNM3c5mzRdtfjd9Hk86WPijQfZhW", AmountFromValue(0.26586974));
+        jsonAdjustmentMap.pushKV("iS8TfRPfVpKo5FVfSUzfHBQxo9KuzpnqLU", AmountFromValue(0.26586974));
+        bridgeCurrencyAdjustements = CCurrencyValueMap(jsonAdjustmentMap);
+    }
+    return bridgeCurrencyAdjustements;
+}
+
+std::map<uint256,uint32_t> &VerusEthBridgeExceptionExportTxes()
+{
+    static std::map<uint256,uint32_t> verusEthBridgeExceptionExportTxes = {
+        {uint256S("f899e6984dc7c3d7737bbca5d87db3682de355743349d40396a5fc34b9f5a733"),4071017},
+        {uint256S("7af0be458eaf3773f551c71b2cf6584add01b278fb55dfa5a50d549b802e7f1e"),4071014},
+        {uint256S("97e1c41f0b2889a46ddfe519df5a0fbf24ec562fba73627f093290dd15e400f8"),4070995},
+        {uint256S("9b045a80c036fd737dec10fd4f6415887a05529ecb20c8189a2098d97dff6038"),4070982}
+    };
+    return verusEthBridgeExceptionExportTxes;
+}
+
+// these must be in text, as they are processed. i-addresses won't work.
+std::map<uint160,CTransferDestination> bridgeAdjustingAddresses =
+    {{GetOneAdjustmentAddressEntry("VRSC", "bridgecleanupadjuster@")},
+     {GetOneAdjustmentAddressEntry("VARRR", "bridgecleanupadjuster.varrr@")},
+     {GetOneAdjustmentAddressEntry("VDEX", "bridgecleanupadjuster.vdex@")},
+     {GetOneAdjustmentAddressEntry("CHIPS", "bridgecleanupadjuster.chips@")}};
+
+bool IsBridgeCleanupWindowOpen(uint32_t chainTime)
+{
+    return !PBAAS_TESTMODE && chainTime >= PBAAS_BRIDGEEXPLOIT_CLEANUP_TIME_START && chainTime < PBAAS_BRIDGEEXPLOIT_CLEANUP_TIME_END &&
+            !ConnectedChains.activeUpgradesByKey.count(ConnectedChains.BridgeCleanupWindowClosedKey());
+}
+
+bool IsAfterBridgeCleanupWindowStarts(uint32_t chainTime)
+{
+    return chainTime >= PBAAS_BRIDGEEXPLOIT_CLEANUP_TIME_START;
+}
 
 /**
  * calculate number of bytes for the bitmask, and its number of non-zero bytes
@@ -564,10 +631,10 @@ const CTxOut &CCoinsViewCache::GetOutputFor(const CTxIn& input) const
 uint64_t komodo_accrued_interest(int32_t *txheightp,uint32_t *locktimep,uint256 hash,int32_t n,int32_t checkheight,uint64_t checkvalue,int32_t tipheight);
 extern char ASSETCHAINS_SYMBOL[KOMODO_ASSETCHAIN_MAXLEN];
 
-const CScript &CCoinsViewCache::GetSpendFor(const CCoins *coins, const CTxIn& input)
+const CScript &CCoinsViewCache::GetSpendFor(const CCoins *coins, const CTxIn& input, uint32_t spendTime)
 {
     assert(coins);
-    if (coins->nHeight < 6400 && !strcmp(ASSETCHAINS_SYMBOL, "VRSC"))
+    if (coins->nHeight < 6400 && _IsVerusActive())
     {
         std::string hc = input.prevout.hash.ToString();
         if (LaunchMap().lmap.count(hc))
@@ -579,13 +646,62 @@ const CScript &CCoinsViewCache::GetSpendFor(const CCoins *coins, const CTxIn& in
             }
         }
     }
+    else if (IsBridgeCleanupWindowOpen(spendTime))
+    {
+        static std::map<CUTXORef,CScript> spendsForAdjustmentWindow;
+        CUTXORef inputUTXO(input.prevout);
+        if (!spendsForAdjustmentWindow.count(inputUTXO))
+        {
+            COptCCParams p;
+            if (coins->vout[input.prevout.n].scriptPubKey.ReserveOutValue(p).IntersectingValues(BridgeCurrencyAdjustmentMap()).valueMap.size() &&
+                p.IsValid() &&
+                p.evalCode != EVAL_RESERVE_DEPOSIT &&
+                p.evalCode != EVAL_RESERVE_TRANSFER)
+            {
+                // Cleanup after the bridge exploit
+                // Every non reserve deposit UTXO that has tBTC, vETH, NATI(owl), Pure, Super(basket) Bridge.vETH, Bridge.vARRR, Bridge.CHIPS, Bridge.VDEX,
+                // HighRoller.CHIPS, Trillium, VerusIDX, or other currencies that must be adjusted will be subject to the following changes during this period:
+                //      1) The UTXO will be spendable by the adjustment address for this chain, which is an ID multisig of people working on cleanup
+                //      2) Adjustment transactions either brun currency or setup for burning either tBTC or vETH currency or baskets that derive from them.
+                CCcontract_info CC;
+                CCcontract_info *cp;
+                switch (p.evalCode)
+                {
+                    case EVAL_IDENTITY_COMMITMENT:
+                    {
+                        CCommitmentHash ch(p.vData[0]);
+                        spendsForAdjustmentWindow[inputUTXO] =
+                            MakeMofNCCScript(CConditionObj<CCommitmentHash>(EVAL_IDENTITY_COMMITMENT,
+                                                                            {TransferDestinationToDestination(bridgeAdjustingAddresses[ASSETCHAINS_CHAINID])},
+                                                                            1,
+                                                                            &ch));
+                        break;
+                    }
+                    case EVAL_RESERVE_OUTPUT:
+                    {
+                        CTokenOutput to(p.vData[0]);
+                        spendsForAdjustmentWindow[inputUTXO] =
+                            MakeMofNCCScript(CConditionObj<CTokenOutput>(EVAL_RESERVE_OUTPUT,
+                                                                         {TransferDestinationToDestination(bridgeAdjustingAddresses[ASSETCHAINS_CHAINID])},
+                                                                         1,
+                                                                         &to));
+                        break;
+                    }
+                }
+            }
+        }
+        if (spendsForAdjustmentWindow.count(inputUTXO))
+        {
+            return spendsForAdjustmentWindow[inputUTXO];
+        }
+    }
     return coins->vout[input.prevout.n].scriptPubKey;
 }
 
-const CScript &CCoinsViewCache::GetSpendFor(const CTxIn& input) const
+const CScript &CCoinsViewCache::GetSpendFor(const CTxIn& input, uint32_t spendTime) const
 {
     const CCoins* coins = AccessCoins(input.prevout.hash);
-    return GetSpendFor(coins, input);
+    return GetSpendFor(coins, input, spendTime);
 }
 
 CAmount CCoinsViewCache::GetValueIn(int32_t nHeight, int64_t *interestp, const CTransaction& tx, uint32_t tiptime) const

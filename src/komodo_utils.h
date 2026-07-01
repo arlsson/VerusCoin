@@ -1301,7 +1301,7 @@ void iguana_initQ(queue_t *Q,char *name)
 
 uint16_t _komodo_userpass(char *username,char *password, FILE *fp)
 {
-    char *rpcuser,*rpcpassword,*rpcportstr,*str,line[8192]; uint16_t rpcport = 0;
+    char *rpcuser = nullptr,*rpcpassword = nullptr,*rpcportstr = nullptr,*str,line[8192]; uint16_t rpcport = 0;
     rpcuser = rpcpassword = 0;
     username[0] = password[0] = 0;
     while ( fgets(line,sizeof(line),fp) != 0 )
@@ -1327,8 +1327,10 @@ uint16_t _komodo_userpass(char *username,char *password, FILE *fp)
     if ( rpcpassword != 0 )
         free(rpcpassword);
     if ( rpcportstr != 0 )
+    {
         rpcport = (uint16_t)atoi(rpcportstr);
         free(rpcportstr);
+    }
     return(rpcport);
 }
 

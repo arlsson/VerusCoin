@@ -50,6 +50,9 @@ static_assert(SAPLING_TX_VERSION >= SAPLING_MIN_TX_VERSION,
 static_assert(SAPLING_TX_VERSION <= SAPLING_MAX_TX_VERSION,
     "Sapling tx version must not be higher than maximum");
 
+// A recipient is a tuple of address, amount, memo (optional if zaddr), and CScript (optional and only if taddr)
+typedef std::tuple<std::string, CAmount, std::string, CScript> SendManyRecipient;
+
 /**
  * A shielded input to a transaction. It contains data that describes a Spend transfer.
  */
@@ -665,9 +668,8 @@ public:
     }
 
     // returns an MMR node for the block merkle mountain range
-    TransactionMMRange GetTransactionMMR() const;
-    CDefaultMMRNode GetDefaultMMRNode() const;
-    uint256 GetMMRRoot() const;
+    CDefaultMMRNode GetDefaultMMRNode(bool capped) const;
+    uint256 GetMMRRoot(bool capped) const;
 
     /*
      * Context for the two methods below:
@@ -885,6 +887,8 @@ struct CMutableTransaction
     uint256 GetHash() const;
 };
 
+class _CTransactionMap;
+
 class CTransactionHeader
 {
 public:
@@ -937,20 +941,25 @@ public:
                        nLockTime(LockTime),
                        nExpiryHeight(ExpiryHeight),
                        nValueBalance(ValueBalance)
-    {}
+    {
+        if ((((int64_t)nVins * 2) + (int64_t)nVouts + (int64_t)nShieldedSpends + (int64_t)nShieldedOutputs + 1) > UINT16_MAX)
+        {
+            *this = CTransactionHeader();
+        }
+    }
 
     CTransactionHeader(const CTransaction &tx) :
                        CTransactionHeader(tx.GetHash(),
-                                        tx.fOverwintered,
-                                        tx.nVersion,
-                                        tx.nVersionGroupId,
-                                        (int32_t)tx.vin.size(),
-                                        (int32_t)tx.vout.size(),
-                                        (int32_t)tx.vShieldedSpend.size(),
-                                        (int32_t)tx.vShieldedOutput.size(),
-                                        tx.nLockTime,
-                                        tx.nExpiryHeight,
-                                        tx.valueBalance)
+                                          tx.fOverwintered,
+                                          tx.nVersion,
+                                          tx.nVersionGroupId,
+                                          (int32_t)tx.vin.size(),
+                                          (int32_t)tx.vout.size(),
+                                          (int32_t)tx.vShieldedSpend.size(),
+                                          (int32_t)tx.vShieldedOutput.size(),
+                                          tx.nLockTime,
+                                          tx.nExpiryHeight,
+                                          tx.valueBalance)
     {}
 
     ADD_SERIALIZE_METHODS;
@@ -968,20 +977,27 @@ public:
         READWRITE(nLockTime);
         READWRITE(nExpiryHeight);
         READWRITE(nValueBalance);
+        if ((((int64_t)nVins * 2) + (int64_t)nVouts + (int64_t)nShieldedSpends + (int64_t)nShieldedOutputs + 1) > UINT16_MAX)
+        {
+            *this = CTransactionHeader();
+        }
     }
 
     CMutableTransaction RehydrateTransactionScaffold()
     {
         CMutableTransaction mtx;
-        mtx.fOverwintered = fOverwintered;
-        mtx.nVersion = nVersion;
-        mtx.nVersionGroupId = nVersionGroupId;
-        mtx.vin.resize(nVins);
-        mtx.vout.resize(nVouts);
-        mtx.vShieldedSpend.resize(nShieldedSpends);
-        mtx.vShieldedOutput.resize(nShieldedOutputs);
-        mtx.nLockTime = nLockTime;
-        mtx.nExpiryHeight = nExpiryHeight;
+        if ((((int64_t)nVins * 2) + (int64_t)nVouts + (int64_t)nShieldedSpends + (int64_t)nShieldedOutputs + 1) <= UINT16_MAX)
+        {
+            mtx.fOverwintered = fOverwintered;
+            mtx.nVersion = nVersion;
+            mtx.nVersionGroupId = nVersionGroupId;
+            mtx.vin.resize(nVins);
+            mtx.vout.resize(nVouts);
+            mtx.vShieldedSpend.resize(nShieldedSpends);
+            mtx.vShieldedOutput.resize(nShieldedOutputs);
+            mtx.nLockTime = nLockTime;
+            mtx.nExpiryHeight = nExpiryHeight;
+        }
         return mtx;
     }
 
@@ -990,6 +1006,10 @@ public:
         // hash header information and put in MMR and map, followed by all elements in order
         int32_t idx = 0;
         std::map<std::pair<int16_t, int16_t>, int32_t> retVal;
+        if ((((int64_t)nVins * 2) + (int64_t)nVouts + (int64_t)nShieldedSpends + (int64_t)nShieldedOutputs + 1) > UINT16_MAX)
+        {
+            return retVal;
+        }
         retVal[std::make_pair((int16_t)CTransactionHeader::TX_HEADER, (int16_t)0)] = idx++;
 
         for (unsigned int n = 0; n < nVins; n++) {
@@ -1015,29 +1035,6 @@ public:
     }
 };
 
-class CTransactionMap
-{
-public:
-    TransactionMMRange transactionMMR;              // this enables us to generate a proof of any sub-element in the transaction that associates with the txid
-    std::map<std::pair<int16_t, int16_t>, int32_t> elementHashMap;  // <type,index> for idx num lookup from the element type and sub-index to global index
-
-    CTransactionMap(const CTransaction &tx);
-
-    // returns -1 if element is not found
-    int32_t GetElementIndex(int16_t elementType, int16_t indexInType)
-    {
-        auto it = elementHashMap.find(std::make_pair(elementType, indexInType));
-        if (it != elementHashMap.end())
-        {
-            return it->second;
-        }
-        else
-        {
-            return -1;
-        }
-    }
-};
-
 // enable efficient cross-chain, partial transaction proofs
 class CTransactionComponentProof
 {
@@ -1059,7 +1056,7 @@ public:
         elVchObj = ::AsVector(txPart);
     }
 
-    CTransactionComponentProof(TransactionMMView &txView, const CTransactionMap &txMap, const CTransaction &tx, int16_t partType, int16_t subIndex);
+    CTransactionComponentProof(TransactionMMView &txView, const _CTransactionMap &txMap, const CTransaction &tx, int16_t partType, int16_t subIndex);
 
     ADD_SERIALIZE_METHODS;
 
@@ -1142,7 +1139,7 @@ public:
             case CTransactionHeader::TX_PREVOUTSEQ:
             {
                 CTxIn txPart;
-                if (Rehydrate(txPart))
+                if (Rehydrate(txPart) && txPart.scriptSig.empty())
                 {
                     auto hw = CDefaultMMRNode::GetHashWriter();
                     hw << txPart.prevout;
@@ -1223,6 +1220,72 @@ public:
     }
 };
 
+class _CTransactionMap
+{
+public:
+    TransactionMMRange transactionMMR;              // this enables us to generate a proof of any sub-element in the transaction that associates with the txid
+    std::map<std::pair<int16_t, int16_t>, int32_t> elementHashMap;  // <type,index> for idx num lookup from the element type and sub-index to global index
+
+    _CTransactionMap(const CTransaction &tx);
+
+    // returns -1 if element is not found
+    int32_t GetElementIndex(int16_t elementType, int16_t indexInType)
+    {
+        auto it = elementHashMap.find(std::make_pair(elementType, indexInType));
+        if (it != elementHashMap.end())
+        {
+            return it->second;
+        }
+        else
+        {
+            return -1;
+        }
+    }
+};
+
+class CTransactionMap
+{
+public:
+    _CTransactionMap txMap;
+    TransactionMMView txView;
+    bool capped;
+
+    CTransactionMap(const CTransaction &tx, bool Capped) : txMap(tx), txView(txMap.transactionMMR), capped(Capped) {}
+
+    // returns -1 if element is not found
+    int32_t GetElementIndex(int16_t elementType, int16_t indexInType)
+    {
+        return txMap.GetElementIndex(elementType, indexInType);
+    }
+
+    uint256 GetRoot()
+    {
+        uint256 root = txView.GetRoot();
+        // if this is capped, the root gets hashed with the
+        // number of elements in the MMR
+        //
+        if (capped)
+        {
+            auto hw = CDefaultMMRNode::GetHashWriter();
+            hw << root;
+            hw << ArithToUint256(arith_uint256(txView.size()));
+            root = hw.GetHash();
+        }
+        return root;
+    }
+
+    CTransactionComponentProof GetComponentProof(const CTransaction &tx, uint16_t elType, uint16_t elIndex)
+    {
+        CTransactionComponentProof retVal(txView, txMap, tx, elType, elIndex);
+        if (capped &&
+            retVal.elProof.proofSequence.size())
+        {
+            ((CMMRNodeBranch *)retVal.elProof.proofSequence[0])->branch.push_back(ArithToUint256(arith_uint256(txView.size())));
+        }
+        return retVal;
+    }
+};
+
 // class that enables efficient cross-chain proofs of only parts of a transaction
 class CBlockIndex;
 class CPartialTransactionProof
@@ -1231,7 +1294,8 @@ public:
     enum EVersion {
         VERSION_INVALID = 0,
         VERSION_FIRST = 1,
-        VERSION_LAST = 1,
+        VERSION_TXHASH_CAP = 2,
+        VERSION_LAST = 2,
         VERSION_CURRENT = 1
     };
     enum EType {
@@ -1243,10 +1307,10 @@ public:
     };
     int8_t version;                                     // to enable versioning of this type of proof
     int8_t type;                                        // this may represent transactions from different systems
-    CMMRProof txProof;                                  // proof of the transaction in its block, either normal Merkle pre-PBaaS,MMR partial post, or PATRICIA Trie
+    CMMRProof txProof;                                  // proof of the transaction in its block, either normal Merkle pre-PBaaS, MMR partial post, or PATRICIA Trie
     std::vector<CTransactionComponentProof> components; // each component (or TX for older blocks) to prove
 
-    CPartialTransactionProof(int8_t Version=VERSION_CURRENT) : version(Version), type(TYPE_PBAAS) {}
+    CPartialTransactionProof(int8_t Version=VERSION_INVALID) : version(Version), type(TYPE_PBAAS) {}
 
     CPartialTransactionProof(const UniValue &uni);
 
@@ -1254,7 +1318,7 @@ public:
 
     CPartialTransactionProof(const CMMRProof &proof,
                              const std::vector<CTransactionComponentProof> &Components,
-                             int8_t Version=VERSION_CURRENT,
+                             int8_t Version,
                              int8_t Type=TYPE_PBAAS) :
                              version(Version),
                              type(Type),
@@ -1269,13 +1333,13 @@ public:
 
     // This creates a proof for older blocks and full transactions, typically where the root proof is a standard
     // merkle proof
-    CPartialTransactionProof(const CMMRProof &txRootProof, const CTransaction &tx) :
-        version(VERSION_CURRENT), type(TYPE_FULLTX), txProof(txRootProof), components({CTransactionComponentProof(tx, 0, CMMRProof())}) { }
+    CPartialTransactionProof(const CMMRProof &txRootProof, const CTransaction &tx, int8_t Version) :
+        version(Version), type(TYPE_FULLTX), txProof(txRootProof), components({CTransactionComponentProof(tx, 0, CMMRProof())}) { }
 
     // This creates a proof for the pre-header of a block, which enables proof of sapling txes and other things in a block header
     // without requiring an implementation of VerusHash
-    CPartialTransactionProof(const CMMRProof &txRootProof, const CPBaaSPreHeader &preHeader) :
-        version(VERSION_CURRENT), type(TYPE_PBAAS), txProof(txRootProof), components({CTransactionComponentProof(preHeader, 0, CMMRProof())}) { }
+    CPartialTransactionProof(const CMMRProof &txRootProof, const CPBaaSPreHeader &preHeader, int8_t Version=VERSION_CURRENT) :
+        version(Version), type(TYPE_PBAAS), txProof(txRootProof), components({CTransactionComponentProof(preHeader, 0, CMMRProof())}) { }
 
     CPartialTransactionProof(const std::vector<CPartialTransactionProof> &parts)
     {
@@ -1358,12 +1422,19 @@ public:
         return uint256();
     }
 
-    // this validates that all parts of a transaction match and either returns a full transaction
-    // and its hash, a partially filled transaction and its MMR root, or NULL
+    bool IsCapped() const
+    {
+        return version >= VERSION_TXHASH_CAP;
+    }
+
+    static const int32_t MaxUncappedComponentSequenceSize = 18;
+
+    // this validates that all parts of a transaction match a common root and either returns a full transaction
+    // and its hash, a partially filled transaction and its traansaction MMR root, or NULL
     uint256 GetPartialTransaction(CTransaction &outTx, bool *pIsPartial=nullptr) const;
 
-    // this validates that all parts of a transaction match and either returns a full transaction
-    // and its hash, a partially filled transaction and its MMR root, or NULL
+    // this validates that all parts of a transaction match and also enables caller to check whether or not return val
+    // matches the expected block MMR root, which should be the return value
     uint256 CheckPartialTransaction(CTransaction &outTx, bool *pIsPartial=nullptr, bool optimizedETH=true) const;
 
     bool IsBlockPreHeader() const

@@ -566,6 +566,20 @@ public:
         return CMMRNodeBranch(CMMRNodeBranch::BRANCH_MMRBLAKE_NODE, 2, 1, std::vector<uint256>({BlockMMRRoot()}));
     }
 
+    bool HasCappedTransactionMap() const
+    {
+        if (nVersion == CBlockHeader::VERUS_V2)
+        {
+            return CConstVerusSolutionVector::Version(nSolution.nSolution()) >= CActivationHeight::ACTIVATE_PBAAS_HARDEN1;
+        }
+        return 0;
+    }
+
+    int PartialTransactionProofVersion() const
+    {
+        return HasCappedTransactionMap() ? CPartialTransactionProof::VERSION_TXHASH_CAP : CPartialTransactionProof::VERSION_CURRENT;
+    }
+
     static std::string BlockEntropyKeyName()
     {
         return "vrsc::random.entropy.defaultkey";

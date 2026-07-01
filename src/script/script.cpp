@@ -861,7 +861,7 @@ CCurrencyValueMap CScript::ReserveOutValue(COptCCParams &p, bool spendableOnly) 
             {
                 // this can only have an advance commitment hash if the serialization data is larger than the first hash
                 // if so, we attempt to get both a hash commitment and a token output from the data. the only time this will be
-                // larger in a way that matters is on testnet for now.
+                // larger in a way that matters
                 CCommitmentHash ch(p.vData[0]);
 
                 if (ch.IsValid())

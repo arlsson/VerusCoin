@@ -1,6 +1,5 @@
 /********************************************************************
  *
- *
  * Distributed under the MIT software license, see the accompanying
  * file COPYING or http://www.opensource.org/licenses/mit-license.php.
  *
@@ -9,516 +8,522 @@
 #include "uint256.h"
 #include "mmr.h"
 #include <inttypes.h>
+#include <stdexcept>
+#include <cstddef>
+#include <cstring>
 
-/**
- * Helper functions
- * **/
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
 
-std::string string_to_hex(const std::string& input)
+// Expands each byte into two uppercase ASCII hex nibble characters.
+// e.g. {0xAB} -> {'A','B'}
+// This is the "nibble" representation used throughout the Patricia proof code.
+static std::vector<unsigned char> bytesToNibbles(const unsigned char* data, size_t len)
 {
-    static const char hex_digits[] = "0123456789ABCDEF";
-
-    std::string output;
-    output.reserve(input.length() * 2);
-    for (unsigned char c : input)
-    {
-        output.push_back(hex_digits[c >> 4]);
-        output.push_back(hex_digits[c & 15]);
+    static const char kHex[] = "0123456789ABCDEF";
+    std::vector<unsigned char> out;
+    out.reserve(len * 2);
+    for (size_t i = 0; i < len; i++) {
+        out.push_back(static_cast<unsigned char>(kHex[data[i] >> 4]));
+        out.push_back(static_cast<unsigned char>(kHex[data[i] & 0xf]));
     }
-    return output;
+    return out;
 }
 
-std::string bytes_to_hex(const std::vector<unsigned char> &in)
+static inline std::vector<unsigned char> bytesToNibbles(const std::vector<unsigned char>& v)
 {
-    std::vector<unsigned char>::const_iterator from = in.cbegin();
-    std::vector<unsigned char>::const_iterator to = in.cend();
-    std::ostringstream oss;
-    for (; from != to; ++from)
-       oss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(*from);
-    return oss.str();
+    return bytesToNibbles(v.data(), v.size());
 }
 
-std::vector<unsigned char> uint64_to_vec_BE(uint64_t input){
+// Decode a big-endian byte span into a size_t length value.
+static size_t decodeBELength(const unsigned char* p, size_t n)
+{
+    size_t val = 0;
+    for (size_t i = 0; i < n; i++)
+        val = (val << 8) | p[i];
+    return val;
+}
 
-    std::vector<unsigned char> bytes;
-    while (input) {
-        bytes.push_back(input & 0xFF);
-        input >>= 8;
+// Minimal big-endian encoding of a uint64.  Zero is encoded as an empty vector.
+static std::vector<unsigned char> uint64ToBEVec(uint64_t v)
+{
+    std::vector<unsigned char> out;
+    while (v) {
+        out.push_back(static_cast<unsigned char>(v & 0xFF));
+        v >>= 8;
     }
-    std::reverse(bytes.begin(), bytes.end());
-    return bytes;
-}
-/**
- * Returns the number of in order matching nibbles between the 2 arrays
- **/
-int matchingNibbleLength(std::vector<unsigned char> nibble1,std::vector<unsigned char> nibble2){
-    int i;
-    for(i = 0; nibble1.size() > i && nibble2.size() > i && nibble1[i] == nibble2[i]; i++) {}
-    return i;
+    std::reverse(out.begin(), out.end());
+    return out;
 }
 
-std::vector<unsigned char> toNibbles(std::vector<unsigned char> data){
-    //convert the unsigned char to a hex string the hex string back to a vector of unsigned char
-    std::string tempString = bytes_to_hex(data);
-    std::vector<unsigned char> output(tempString.begin(),tempString.end());
-    return output;
-}
+// ---------------------------------------------------------------------------
+// Deprecated pre-fork helpers — preserved exactly for on-chain compatibility.
+// These deliberately reproduce the original encoding quirks so that proofs
+// accepted before the optimizedProof fork height can still be verified.
+// DO NOT "fix" these functions.
+// ---------------------------------------------------------------------------
 
-std::vector<unsigned char> toNibbles(std::string data){
-    //convert the unsigned char to a hex string the hex string back to a vector of unsigned char
-    //string tempString = bytes_to_hex(data);
-    //check if its an even length if not add a 0 on the front
-    if(data.length()%2 != 0){
-        data = "0" + data;
-    }
-    std::vector<unsigned char> output(data.begin(),data.end());
-    return output;
-}
-
-TrieNode::nodeType TrieNode::setType(){
-    if(raw.size() == 17) return BRANCH;
-    else if(raw.size() == 2){
-        std::vector<unsigned char> nodeKey = toNibbles(raw[0]);
-        //is the key a terminator
-        if(nodeKey[0] > 1) return LEAF;
-        return EXTENSION;
-    }
-    return BRANCH;
-}
-void TrieNode::setKey(){
-    if(type != BRANCH && raw[0].size() > 0){
-        std::vector<unsigned char> inProgressKey = toNibbles(raw[0]);
-        int adjustment = 0;
-        if (int(inProgressKey[0]) % 2) {
-            adjustment = 1;
-        } else {
-            adjustment = 2;
-        }
-        key = std::vector<unsigned char>(inProgressKey.begin() + adjustment,inProgressKey.end());
-    }
-}
-void TrieNode::setValue(){
-    if(type != BRANCH){
-        value = raw[1];
-    }
-}
-
-std::string int_to_hex_deprecated(int input){
+static std::string int_to_hex_deprecated(int input)
+{
     std::stringstream sstream;
-    if(input < 10) sstream << std::hex << 0;
+    if (input < 10) sstream << std::hex << 0;
     sstream << std::hex << input;
-    std::string result = sstream.str();
-    return result;
+    return sstream.str();
 }
 
-std::string uint64_to_hex_deprecated(uint64_t input){
-    if(input < 10){
+static std::string uint64_to_hex_deprecated(uint64_t input)
+{
+    if (input < 10) {
         std::stringstream sstream;
-        if(input < 10) sstream << std::hex << 0;
+        if (input < 10) sstream << std::hex << 0;
         sstream << std::hex << input;
-        std::string result = sstream.str();
-        return result;
+        return sstream.str();
     }
     char buffer[64] = {0};
     sprintf(buffer, "%" PRIx64, input);
     return std::string(buffer);
 }
 
-std::vector<unsigned char> RLP::encodeLength(int length,int offset){
-    std::vector<unsigned char> output;
-    if(length < 56){
-        output.push_back(length+offset);
-    } else {
-        std::vector<unsigned char> lengthBytes;
-        while (length > 0) {
-            lengthBytes.insert(lengthBytes.begin(), static_cast<unsigned char>(length & 0xFF));
-            length >>= 8;
-        }
-
-        // The first byte indicates the start of the data payload.
-        output.push_back(static_cast<unsigned char>(offset + 55 + lengthBytes.size()));
-
-        // Append the binary length bytes.
-        output.insert(output.end(), lengthBytes.begin(), lengthBytes.end());
-    }
-    return output;
+// Count how many leading nibble characters match between a and b.
+static size_t matchingNibbleLength(const std::vector<unsigned char>& a,
+                                   const std::vector<unsigned char>& b)
+{
+    size_t i = 0;
+    while (i < a.size() && i < b.size() && a[i] == b[i])
+        ++i;
+    return i;
 }
 
-std::vector<unsigned char> RLP::encodeLength_deprecated(int length,int offset){
+// ---------------------------------------------------------------------------
+// TrieNode
+// ---------------------------------------------------------------------------
+
+TrieNode::nodeType TrieNode::setType()
+{
+    if (raw.size() == 17) return BRANCH;
+    if (raw.size() == 2 && !raw[0].empty()) {
+        // HP encoding: high nibble of first byte is the prefix.
+        // 0,1 → extension; 2,3 → leaf.
+        unsigned char prefix = raw[0][0] >> 4;
+        return (prefix >= 2) ? LEAF : EXTENSION;
+    }
+    return BRANCH;
+}
+
+void TrieNode::setKey()
+{
+    if (type == BRANCH || raw[0].empty()) return;
+
+    // Expand first element to ASCII nibble chars so we can strip the HP prefix.
+    std::vector<unsigned char> nibbles = bytesToNibbles(raw[0]);
+
+    // HP prefix parity: ASCII chars '0','2' (48,50) are even → skip 2 nibbles;
+    // '1','3' (49,51) are odd → skip 1 nibble.
+    size_t skip = (nibbles[0] % 2 == 0) ? 2u : 1u;
+    key.assign(nibbles.begin() + skip, nibbles.end());
+}
+
+void TrieNode::setValue()
+{
+    if (type == BRANCH)
+        // Slot 17 (raw[16]) holds the branch value when a key terminates here.
+        value = (raw.size() == 17) ? raw[16] : std::vector<unsigned char>{};
+    else
+        value = raw[1];
+}
+
+// ---------------------------------------------------------------------------
+// RLP encode
+// ---------------------------------------------------------------------------
+
+std::vector<unsigned char> RLP::encodeLength(int length, int offset)
+{
+    std::vector<unsigned char> out;
+    if (length < 56) {
+        out.push_back(static_cast<unsigned char>(length + offset));
+    } else {
+        // Encode length as minimal big-endian bytes.
+        std::vector<unsigned char> lenBytes;
+        int tmp = length;
+        while (tmp > 0) {
+            lenBytes.insert(lenBytes.begin(), static_cast<unsigned char>(tmp & 0xFF));
+            tmp >>= 8;
+        }
+        out.push_back(static_cast<unsigned char>(offset + 55 + lenBytes.size()));
+        out.insert(out.end(), lenBytes.begin(), lenBytes.end());
+    }
+    return out;
+}
+
+// Kept for binary compatibility with callers using optimized=false.
+// Intentionally reproduces the original string-based encoding, including its
+// known quirks (e.g. odd-length hex strings for certain lengths), so that
+// pre-fork proofs accepted on-chain can still be verified identically.
+// DO NOT replace this with a call to encodeLength().
+std::vector<unsigned char> RLP::encodeLength_deprecated(int length, int offset)
+{
     std::vector<unsigned char> output;
-    if(length < 56){
-        output.push_back(length+offset);
+    if (length < 56) {
+        output.push_back(length + offset);
     } else {
         std::string hexLength = int_to_hex_deprecated(length);
-        int dataLength = hexLength.size() / 2;
-        std::string firstByte = int_to_hex_deprecated((offset + 55 + dataLength));
+        int dataLength = static_cast<int>(hexLength.size()) / 2;
+        std::string firstByte = int_to_hex_deprecated(offset + 55 + dataLength);
         std::string outputString = firstByte + hexLength;
         output = ParseHex(outputString);
     }
     return output;
 }
 
+std::vector<unsigned char> RLP::encode(std::vector<unsigned char> input)
+{
+    // Single bytes below 0x80 need no length prefix.
+    if (input.size() == 1 && input[0] < 0x80) return input;
 
-std::vector<unsigned char> RLP::encode(std::vector<unsigned char> input){
-    std::vector<unsigned char> output;
-    if(input.size() == 1 && input[0] < 128 ) return input;
-    else {
-        output = optimized ? encodeLength(input.size(),128) : encodeLength_deprecated(input.size(),128);
-        output.insert(output.end(),input.begin(),input.end());
-        return output;
-        }
-    }
-
-std::vector<unsigned char> RLP::encode(std::vector<std::vector<unsigned char>> input){
-    std::vector<unsigned char> encoded;
-    std::vector<unsigned char> inProgress;
-    for(int i = 0; i < input.size(); i++){
-        inProgress = encode(input[i]);
-        encoded.insert(encoded.end(),inProgress.begin(),inProgress.end());
-    }
-    std::vector<unsigned char> output = optimized ?  encodeLength(encoded.size(),192) : encodeLength_deprecated(encoded.size(),192);
-    output.insert(output.end(),encoded.begin(),encoded.end());
-    return output;
+    std::vector<unsigned char> out = optimized
+        ? encodeLength(static_cast<int>(input.size()), 0x80)
+        : encodeLength_deprecated(static_cast<int>(input.size()), 0x80);
+    out.insert(out.end(), input.begin(), input.end());
+    return out;
 }
 
-RLP::rlpDecoded RLP::decode(std::vector<unsigned char> inputBytes){
+std::vector<unsigned char> RLP::encode(std::vector<std::vector<unsigned char>> inputs)
+{
+    std::vector<unsigned char> payload;
+    for (auto& item : inputs) {
+        auto enc = encode(item);
+        payload.insert(payload.end(), enc.begin(), enc.end());
+    }
+    std::vector<unsigned char> out = optimized
+        ? encodeLength(static_cast<int>(payload.size()), 0xc0)
+        : encodeLength_deprecated(static_cast<int>(payload.size()), 0xc0);
+    out.insert(out.end(), payload.begin(), payload.end());
+    return out;
+}
 
-    std::vector<unsigned char> inProgress;
-    std::vector<std::vector <unsigned char>>  decoded;
-    unsigned char firstByte = inputBytes[0];
+// ---------------------------------------------------------------------------
+// RLP decode
+// ---------------------------------------------------------------------------
+
+RLP::rlpDecoded RLP::decode(std::vector<unsigned char> inputBytes, int depth)
+{
+    if (depth > MAX_RLP_DECODE_DEPTH)
+        throw std::invalid_argument("RLP decode: maximum nesting depth exceeded");
+
+    if (inputBytes.empty())
+        throw std::invalid_argument("RLP decode: empty input");
+
+    const unsigned char* p = inputBytes.data();
+    const size_t total = inputBytes.size();
+    const unsigned char first = p[0];
+
     rlpDecoded output;
-    unsigned int length = 0;
 
-    std::vector<unsigned char> innerRemainder;
+    if (first <= 0x7f) {
+        // Single byte string: the byte is its own value.
+        output.data.push_back({first});
+        output.remainder.assign(p + 1, p + total);
 
-    if(firstByte <= 0x7f) {
-        // the data is a string if the range of the first byte(i.e. prefix) is [0x00, 0x7f],
-        //and the string is the first byte itself exactly;
-        inProgress.push_back(firstByte);
-        output.data.push_back(inProgress);
-        inputBytes.erase(inputBytes.begin());
-        output.remainder = inputBytes;
+    } else if (first <= 0xb7) {
+        // Short string: 0 to 55 bytes, length = first - 0x80.
+        size_t strLen = static_cast<size_t>(first - 0x80);
+        if (1 + strLen > total)
+            throw std::invalid_argument("RLP decode: short string overflows input");
+        if (strLen == 1 && p[1] < 0x80)
+            throw std::invalid_argument("RLP decode: single byte < 0x80 must be self-encoded");
+        output.data.push_back(std::vector<unsigned char>(p + 1, p + 1 + strLen));
+        output.remainder.assign(p + 1 + strLen, p + total);
 
-    } else if (firstByte <= 0xb7) {
-        //the data is a string if the range of the first byte is [0x80, 0xb7], and the string whose
-        //length is equal to the first byte minus 0x80 follows the first byte;
-        length = (int)(firstByte - 0x7f);
-        if (firstByte == 0x80) {
-            inProgress = std::vector<unsigned char>();
-        } else {
-            //teh byte std::vector removing the first byte
-            inProgress = std::vector<unsigned char>(inputBytes.begin()+1,inputBytes.begin() + length);
-            //input.slice(1, length);
-            //for (auto const& c : inProgress)
-            //    std::cout << c << ' ';
+    } else if (first <= 0xbf) {
+        // Long string: number of length bytes = first - 0xb7.
+        size_t lenBytes = static_cast<size_t>(first - 0xb7);
+        if (1 + lenBytes > total)
+            throw std::invalid_argument("RLP decode: long string length overflows input");
+        size_t strLen = decodeBELength(p + 1, lenBytes);
+        // Use subtraction to avoid wrapping if strLen is near SIZE_MAX.
+        if (strLen > total - 1 - lenBytes)
+            throw std::invalid_argument("RLP decode: long string payload overflows input");
+        output.data.push_back(std::vector<unsigned char>(p + 1 + lenBytes,
+                                                          p + 1 + lenBytes + strLen));
+        output.remainder.assign(p + 1 + lenBytes + strLen, p + total);
+
+    } else if (first <= 0xf7) {
+        // Short list: payload length = first - 0xc0.
+        size_t listLen = static_cast<size_t>(first - 0xc0);
+        if (1 + listLen > total)
+            throw std::invalid_argument("RLP decode: short list payload overflows input");
+
+        // Recursively decode each item inside the list.
+        std::vector<unsigned char> inner(p + 1, p + 1 + listLen);
+        while (!inner.empty()) {
+            rlpDecoded sub = decode(inner, depth + 1);
+            for (auto& d : sub.data)
+                output.data.push_back(std::move(d));
+            inner = std::move(sub.remainder);
         }
-        if (length == 2 && inProgress[0] < 0x80) {
-            throw std::invalid_argument("invalid rlp encoding: byte must be less 0x80");
-        }
-        output.data.push_back(inProgress);
-        output.remainder = std::vector<unsigned char>(inputBytes.begin()+length,inputBytes.end());
-        return output;
-    } else if(firstByte <= 0xbf){
-        //the data is a string if the range of the first byte is [0xb8, 0xbf], and the length of the string
-        //whose length in bytes is equal to the first byte minus 0xb7 follows the first byte, and the string
-        //follows the length of the string;
-        int dataLength = (int)(firstByte - 0xb6);
-        //calculate the length from the string and convert the hexbytes to an int
-        std::string lengthString = string_to_hex(std::string(inputBytes.begin()+1,inputBytes.begin() + dataLength));
-        //boost::algorithm::hex(inputBytes.begin()+1,inputBytes.begin() + dataLength, back_inserter(lengthString));
-        length = std::stoi(lengthString, nullptr, 16);
-        // inProgress = std::std::vector<unsigned char>(inputBytes.begin() + length,inputBytes.begin() + length + dataLength );
-        std::vector<unsigned char>inProgress(inputBytes.begin() + dataLength,inputBytes.begin() + length + dataLength);
-        if(inProgress.size() < length){
-            throw std::invalid_argument("invalid RLP");
-        }
-        output.data.push_back(inProgress);
-        output.remainder = std::vector<unsigned char>(inputBytes.begin() + dataLength + length,inputBytes.end());
-        return output;
-    } else if(firstByte <= 0xf7){
-        length = (int)(firstByte - 0xbf);
-        std::vector<unsigned char> innerRemainder;
-        innerRemainder = std::vector<unsigned char>(inputBytes.begin() + 1,inputBytes.begin() + length);
-        //need to recurse
-        rlpDecoded innerRLP;
-        while(innerRemainder.size()){
-            innerRLP = decode(innerRemainder);
-            //loop through the returned data array and push back each element
-            for(std::size_t i=0; i<innerRLP.data.size(); ++i)  {
-                decoded.push_back(innerRLP.data[i]);
-            }
-            innerRemainder = innerRLP.remainder;
-        }
-        output.data = decoded;
-        output.remainder = std::vector<unsigned char>(inputBytes.begin()+length,inputBytes.end());
-        return output;
+        output.remainder.assign(p + 1 + listLen, p + total);
+
     } else {
-        int dataLength = (int)(firstByte - 0xf6);
-        std::string testBytes(inputBytes.begin(),inputBytes.end()); //not used
-        std::string lengthString(inputBytes.begin()+1,inputBytes.begin() + dataLength);
-        lengthString = string_to_hex(lengthString);
-        //boost::algorithm::hex(inputBytes.begin()+1,inputBytes.begin() + dataLength, back_inserter(lengthString));
+        // Long list: number of length bytes = first - 0xf7.
+        size_t lenBytes = static_cast<size_t>(first - 0xf7);
+        if (1 + lenBytes > total)
+            throw std::invalid_argument("RLP decode: long list length overflows input");
+        size_t listLen = decodeBELength(p + 1, lenBytes);
+        size_t headerLen = 1 + lenBytes;
+        // Use subtraction to avoid wrapping if listLen is near SIZE_MAX.
+        if (listLen > total - headerLen)
+            throw std::invalid_argument("RLP decode: long list payload overflows input");
+        if (listLen == 0)
+            throw std::invalid_argument("RLP decode: long list has zero-length payload");
 
-        length = std::stoul(lengthString, nullptr, 16);
-        int totalLength = dataLength + length;
-        if(totalLength > inputBytes.size()) {
-            throw std::invalid_argument("invalid rlp: total length is larger than the data");
+        std::vector<unsigned char> inner(p + headerLen, p + headerLen + listLen);
+        while (!inner.empty()) {
+            rlpDecoded sub = decode(inner, depth + 1);
+            for (auto& d : sub.data)
+                output.data.push_back(std::move(d));
+            inner = std::move(sub.remainder);
         }
-        innerRemainder = std::vector<unsigned char>(inputBytes.begin() + dataLength,inputBytes.begin() + totalLength);
-
-        if(innerRemainder.size() == 0){
-            throw std::invalid_argument("invalid rlp: List has an invalid length");
-        }
-        while(innerRemainder.size()){
-            rlpDecoded innerRLP = decode(innerRemainder);
-            //loop through the returned data array and push back each element
-            for(std::size_t i=0; i<innerRLP.data.size(); ++i)  {
-                decoded.push_back(innerRLP.data[i]);
-            }
-            innerRemainder = innerRLP.remainder;
-        }
-        output.data = decoded;
-        output.remainder = std::vector<unsigned char>(inputBytes.begin()+length,inputBytes.end());
-        return output;
+        output.remainder.assign(p + headerLen + listLen, p + total);
     }
 
     return output;
-
 }
 
-RLP::rlpDecoded RLP::decode(std::string inputString){
-    std::vector<unsigned char> inputBytes = ParseHex(inputString);
-    return decode(inputBytes);
+RLP::rlpDecoded RLP::decode(std::string inputString)
+{
+    return decode(ParseHex(inputString));
 }
 
+// ---------------------------------------------------------------------------
+// Patricia proof verification
+// ---------------------------------------------------------------------------
+
+// Walk the Merkle-Patricia proof from rootHash using the given key (raw bytes).
+// Returns the leaf value found at the key, or throws std::invalid_argument on failure.
 template<>
-std::vector<unsigned char> CETHPATRICIABranch::verifyProof(uint256& rootHash,std::vector<unsigned char> key,std::vector<std::vector<unsigned char>>& proof){
-
+std::vector<unsigned char> CETHPATRICIABranch::verifyProof(
+    uint256& rootHash,
+    std::vector<unsigned char> key,
+    std::vector<std::vector<unsigned char>>& proof)
+{
     uint256 wantedHash = rootHash;
     RLP rlp;
 
-    key = toNibbles(key);
-    //loop through each element in the proof
-    for(std::size_t i=0; i< proof.size(); ++i)  {
+    // Key is represented as ASCII uppercase hex nibble characters.
+    key = bytesToNibbles(key);
 
-        //check to see if the hash of the node matches the expected hash
+    for (size_t i = 0; i < proof.size(); ++i) {
+        const std::vector<unsigned char>& nodeBytes = proof[i];
+
+        if (nodeBytes.empty())
+            throw std::invalid_argument("RLP: empty proof node at i=" + std::to_string(i));
+
+        // Each node must hash (keccak256) to the expected value.
         CKeccack256Writer writer;
-        writer.write((const char *)proof[i].data(), proof[i].size());
+        writer.write(reinterpret_cast<const char*>(nodeBytes.data()), nodeBytes.size());
+        if (writer.GetHash() != wantedHash)
+            throw std::invalid_argument("Bad proof node: i=" + std::to_string(i));
 
-        if(writer.GetHash() != wantedHash){
-            std::string error("Bad proof node: i=");
-            error += std::to_string(i);
-            throw std::invalid_argument(error);
-        }
-        //create a trie node
-        TrieNode node(rlp.decode(proof[i]).data);
-        std::vector<unsigned char> child;
-        if(node.type == node.BRANCH) {
-            if(key.size() == 0) {
-                if(i != proof.size() -1){
-                    throw std::invalid_argument(std::string("Additional nodes at end of proof (branch)"));
-                }
+        TrieNode node(rlp.decode(nodeBytes).data);
+
+        if (node.type == TrieNode::BRANCH) {
+            if (key.empty()) {
+                if (i != proof.size() - 1)
+                    throw std::invalid_argument("Additional nodes after terminal branch");
                 return node.value;
             }
 
-            int keyIndex = HexDigit(key[0]);
+            int nibbleIdx = HexDigit(static_cast<char>(key[0]));
+            if (nibbleIdx < 0 || nibbleIdx >= 16)
+                throw std::invalid_argument("Invalid nibble value in key");
+            if (static_cast<size_t>(nibbleIdx) >= node.raw.size())
+                throw std::invalid_argument("Branch node child index out of range");
 
-            child = node.raw[keyIndex];
-            //remove the first nibble of the key as we move up the std::vector
-            key = std::vector<unsigned char>(key.begin()+1,key.end());
+            std::vector<unsigned char> child = node.raw[nibbleIdx];
+            key.erase(key.begin()); // consume one nibble
 
-            if(child.size() == 2){
-                //MIGHT NOT NEED TO DECODE THIS HERE
-                //RLP::rlpDecoded decodedEmbeddedNode = rlp.decode(child).data;
+            if (child.size() == wantedHash.size()) {
+                // Full 32-byte hash — the child is identified by hash.
+                memcpy(wantedHash.begin(), child.data(), child.size());
+            } else if (!child.empty()) {
+                // Inline (short) embedded node — decode it directly.
                 TrieNode embeddedNode(rlp.decode(child).data);
-
-                if(i != proof.size() -1){
-                    throw std::invalid_argument(std::string("Additional nodes at end of proof (embeddedNode)"));
-                }
-
-                if(matchingNibbleLength(node.key,key)!= node.key.size()){
-                    throw std::invalid_argument(std::string("Key length does not match with the proof one (embeddedNode)"));
-                }
-
-                //check that the embedded node key matches the relevant portion of the node key
-
-                key = std::vector<unsigned char>(key.begin() + embeddedNode.key.size(),key.end());
-                if(key.size() !=0){
-                    throw std::invalid_argument(std::string("Key does not match with the proof one (embeddedNode)"));
-                }
-
+                if (i != proof.size() - 1)
+                    throw std::invalid_argument("Additional nodes after embedded branch terminal");
+                if (matchingNibbleLength(embeddedNode.key, key) != embeddedNode.key.size())
+                    throw std::invalid_argument("Key does not match embedded node key");
+                key.erase(key.begin(), key.begin() + embeddedNode.key.size());
+                if (!key.empty())
+                    throw std::invalid_argument("Key not fully consumed after embedded node");
                 return embeddedNode.value;
             } else {
-                uint256 tmp_child;
-                if (child.size() == (size_t)tmp_child.size())
-                {
-                    memcpy(&tmp_child, &child.at(0), child.size());
-                }
-                wantedHash = tmp_child;
+                throw std::invalid_argument("Branch child is empty for the given key nibble");
             }
-        } else if(node.type == node.EXTENSION || node.type == node.LEAF){
-            if(matchingNibbleLength(node.key,key) != node.key.size()){
-                throw std::invalid_argument(std::string("Key does not match with the proof one (embeddedNode)"));
-            }
-            child = node.value;
-            key = std::vector<unsigned char>(key.begin() + node.key.size(),key.end());
 
-            if (key.size() == 0 || child.size() == 17 && key.size() == 1) {
-                // The value is in an embedded branch. Extract it.
-                if (child.size() == 17) {
-                    //child = child[key[0]][1];
-                    //key = std::vector<unsigned char>(key.begin() + 1,key.end());
-                }
-                if (i != proof.size() - 1) {
-                    throw std::invalid_argument(std::string("Additional nodes at end of proof (extention|leaf)"));
-                }
+        } else if (node.type == TrieNode::EXTENSION || node.type == TrieNode::LEAF) {
+            if (matchingNibbleLength(node.key, key) != node.key.size())
+                throw std::invalid_argument("Key does not match node path at i=" + std::to_string(i));
+
+            key.erase(key.begin(), key.begin() + node.key.size());
+            const std::vector<unsigned char>& child = node.value;
+
+            if (key.empty()) {
+                // Reached the target node.
+                if (i != proof.size() - 1)
+                    throw std::invalid_argument("Additional nodes after leaf/extension terminal");
                 return child;
-            } else {
-                uint256 tmp_child;
-                if (child.size() == (size_t)tmp_child.size())
-                {
-                    memcpy(&tmp_child, &child.at(0), child.size());
-                }
-                wantedHash = tmp_child;
             }
+
+            // Extension: child must be a 32-byte hash pointing to the next node.
+            if (child.size() != wantedHash.size())
+                throw std::invalid_argument("Extension value is not a 32-byte hash");
+            memcpy(wantedHash.begin(), child.data(), child.size());
 
         } else {
-                throw std::invalid_argument(std::string("Invalid node type"));
+            throw std::invalid_argument("Invalid trie node type");
         }
-
     }
-    return {0};
+
+    // Proof nodes exhausted without reaching the key — malformed proof.
+    throw std::invalid_argument("verifyProof: proof exhausted without reaching target key");
 }
 
+// ---------------------------------------------------------------------------
+// CETHPATRICIABranch methods
+// ---------------------------------------------------------------------------
 
 template<>
 std::vector<unsigned char> CETHPATRICIABranch::verifyAccountProof()
 {
+    if (proofdata.proof_branch.empty())
+        throw std::invalid_argument("verifyAccountProof: account proof is empty");
+
+    // Key = keccak256(address)
     CKeccack256Writer key_hasher;
-    key_hasher.write((const char *)(&address), address.size());
+    key_hasher.write(reinterpret_cast<const char*>(&address), address.size());
     uint256 key_hash = key_hasher.GetHash();
+    std::vector<unsigned char> address_hash(key_hash.begin(), key_hash.end());
 
-    std::vector<unsigned char> address_hash(key_hash.begin(),key_hash.end());
-    //create key from account address
-    try{
-        CKeccack256Writer stateroot_hasher;
-        stateroot_hasher.write((const char *)proofdata.proof_branch[0].data(), proofdata.proof_branch[0].size());
-
-        //As we dont have the state root from the Notaries, spoof the state root to pass for first RLP loop check
-        stateRoot =  stateroot_hasher.GetHash();
-        return verifyProof(stateRoot,address_hash,proofdata.proof_branch);
-    }catch(const std::invalid_argument& e){
-
-        memset(&stateRoot,0,stateRoot.size());
-        std::cerr << "exception: " << e.what() << std::endl;
-        throw std::invalid_argument(std::string("verifyAccountProof"));
+    try {
+        // Derive the state root from the first (root) proof node, since we may
+        // not have the authoritative state root from the notaries.
+        CKeccack256Writer root_hasher;
+        root_hasher.write(
+            reinterpret_cast<const char*>(proofdata.proof_branch[0].data()),
+            proofdata.proof_branch[0].size());
+        stateRoot = root_hasher.GetHash();
+        return verifyProof(stateRoot, address_hash, proofdata.proof_branch);
+    } catch (const std::invalid_argument& e) {
+        memset(&stateRoot, 0, stateRoot.size());
+        throw std::invalid_argument(std::string("verifyAccountProof: ") + e.what());
     }
-
 }
 
 template<>
-uint256 CETHPATRICIABranch::verifyStorageProof(uint256 ccExporthash, bool optimizedProof)
+uint256 CETHPATRICIABranch::verifyStorageProof(uint256 ccExportHash, bool optimizedProof)
 {
-    //Check the storage value hash, which is the hash of the crosschain export transaction
-    //matches the the RLP decoded information from the bridge keeper
-
-    std::vector<unsigned char> ccExporthash_vec(ccExporthash.begin(),ccExporthash.end());
     RLP rlp(optimizedProof);
-    try{
+
+    // --- Step 1: verify storage proof and check the stored value ---
+    try {
+        // Storage key = keccak256(storageProofKey)
         CKeccack256Writer key_hasher;
-        key_hasher.write((const char *)(&storageProofKey), storageProofKey.size());
-
+        key_hasher.write(reinterpret_cast<const char*>(&storageProofKey),
+                         storageProofKey.size());
         uint256 key_hash = key_hasher.GetHash();
-        std::vector<unsigned char> storageProofKey_vec(key_hash.begin(),key_hash.end());
-        std::vector<unsigned char> storageValue = verifyProof(storageHash,storageProofKey_vec,storageProof.proof_branch);
-        RLP::rlpDecoded decodedValue = rlp.decode(bytes_to_hex(storageValue));
+        std::vector<unsigned char> keyVec(key_hash.begin(), key_hash.end());
 
-        while(decodedValue.data[0].size() < 32)
-        {
-            decodedValue.data[0].insert(decodedValue.data[0].begin(), 0x00); //proofs can be truncated on the left.
-        }
+        std::vector<unsigned char> storageValue =
+            verifyProof(storageHash, keyVec, storageProof.proof_branch);
 
-        if(ccExporthash_vec != decodedValue.data[0])
-        {
-            throw std::invalid_argument(std::string("RLP Storage Value does not match"));
-        }
+        if (storageValue.empty())
+            throw std::invalid_argument("Storage proof returned empty value");
 
-    }catch(const std::invalid_argument& e){
-        LogPrintf(" %s\n", e.what());
-        memset(&stateRoot,0,stateRoot.size());
+        // The stored value is RLP-encoded — decode it.
+        RLP::rlpDecoded decoded = rlp.decode(storageValue);
+        if (decoded.data.empty())
+            throw std::invalid_argument("RLP decoded storage value is empty");
+
+        // Proofs may be left-truncated; pad to 32 bytes.
+        auto& val = decoded.data[0];
+        while (val.size() < 32)
+            val.insert(val.begin(), 0x00);
+
+        std::vector<unsigned char> expectedHash(ccExportHash.begin(), ccExportHash.end());
+        if (val != expectedHash)
+            throw std::invalid_argument("RLP Storage Value does not match expected hash");
+
+    } catch (const std::invalid_argument& e) {
+        LogPrintf("%s\n", e.what());
+        memset(&stateRoot, 0, stateRoot.size());
         return stateRoot;
     }
 
-    //Storage value has now been cheked that it RLP decodes and matches the storageHash.
-
-    //Next check that the Account proof RLP decodes and the account value matches the storage encoded
-
+    // --- Step 2: verify account proof ---
     std::vector<unsigned char> accountValue;
-    try{
+    try {
         accountValue = verifyAccountProof();
-    }
-    catch(const std::invalid_argument& e){
-
-        LogPrintf("Account Proof Failed : %s\n", e.what());
-        memset(&stateRoot,0,stateRoot.size());
+    } catch (const std::invalid_argument& e) {
+        LogPrintf("Account Proof Failed: %s\n", e.what());
+        memset(&stateRoot, 0, stateRoot.size());
         return stateRoot;
     }
 
-    //rlp encode the nonce , account balance , storageRootHash and codeHash
-    std::vector<unsigned char> encodedAccount;
-    std::vector<unsigned char> storage(storageHash.begin(),storageHash.end());
-    try
-    {
-        std::vector<std::vector<unsigned char>> toEncode;
-        toEncode.push_back(optimizedProof ? uint64_to_vec_BE(nonce) : ParseHex(uint64_to_hex_deprecated(nonce)));
-        toEncode.push_back(GetBalanceAsBEVector());
-        toEncode.push_back(storage);
-        std::vector<unsigned char> codeHash_vec(codeHash.begin(),codeHash.end());
-        toEncode.push_back(codeHash_vec);
-        encodedAccount = rlp.encode(toEncode);
-    }
-    catch(const std::invalid_argument& e)
-    {
-        LogPrintf("RLP Encode failed : %s\n", e.what());
-        memset(&stateRoot,0,stateRoot.size());
-        return stateRoot;
-    }
-    //confim that the encoded account details match those stored in the proof
-    while(accountValue.size() < 32)
-    {
-        accountValue.insert(accountValue.begin(), 0x00); //proofs can be truncated on the left.
-    }
+    // --- Step 3: RLP-encode expected account state and compare with proof value ---
+    try {
+        std::vector<unsigned char> storageHashVec(storageHash.begin(), storageHash.end());
+        std::vector<unsigned char> codeHashVec(codeHash.begin(), codeHash.end());
 
-    if(encodedAccount != accountValue){
-        memset(&stateRoot,0,stateRoot.size());
-        LogPrintf("ETH Encoded Account Does not match proof : ");
-        memset(&stateRoot,0,stateRoot.size());
-        return stateRoot;
-    }
-    else {
+        std::vector<std::vector<unsigned char>> toEncode = {
+            optimizedProof ? uint64ToBEVec(nonce) : ParseHex(uint64_to_hex_deprecated(nonce)),
+            GetBalanceAsBEVector(),
+            storageHashVec,
+            codeHashVec,
+        };
+
+        std::vector<unsigned char> encodedAccount = rlp.encode(toEncode);
+
+        // Pad account value to at least 32 bytes.
+        while (accountValue.size() < 32)
+            accountValue.insert(accountValue.begin(), 0x00);
+
+        if (encodedAccount != accountValue) {
+            LogPrintf("ETH Encoded Account does not match proof\n");
+            memset(&stateRoot, 0, stateRoot.size());
+            return stateRoot;
+        }
+
         LogPrint("crosschain", "%s: PATRICIA Tree proof Account Matches\n", __func__);
+
+    } catch (const std::invalid_argument& e) {
+        LogPrintf("RLP Encode failed: %s\n", e.what());
+        memset(&stateRoot, 0, stateRoot.size());
+        return stateRoot;
     }
-    //run the storage proof
 
     return stateRoot;
 }
 
 template<>
-bool CETHPATRICIABranch::CheckStorageKeyHash(uint32_t mapIndex) const{
-
-    CKeccack256Writer keyhw;
+bool CETHPATRICIABranch::CheckStorageKeyHash(uint32_t mapIndex) const
+{
+    // Storage key for a Solidity mapping(K => V) at slot 0:
+    //   keccak256(abi.encode(mapIndex, uint256(0)))
+    // = keccak256(mapIndex as 32-byte big-endian ++ slot as 32-byte big-endian zeros)
+    CKeccack256Writer hw;
     arith_uint256 num256(mapIndex);
     uint256 tmp = ArithToUint256(num256);
-    std::vector<unsigned char> mapIndex_vec(tmp.begin(), tmp.end());
-    std::reverse(mapIndex_vec.begin(), mapIndex_vec.end());
-    std::vector<unsigned char> additional(32, 0); 
-    mapIndex_vec.insert(mapIndex_vec.end(), additional.begin(), additional.end());
-    keyhw.write((const char *)mapIndex_vec.data(), mapIndex_vec.size());
-    return keyhw.GetHash() == storageProofKey;
+    std::vector<unsigned char> mapIndexVec(tmp.begin(), tmp.end());
+    std::reverse(mapIndexVec.begin(), mapIndexVec.end()); // to big-endian
+    std::vector<unsigned char> slotPadding(32, 0x00);     // slot 0
+    mapIndexVec.insert(mapIndexVec.end(), slotPadding.begin(), slotPadding.end());
+    hw.write(reinterpret_cast<const char*>(mapIndexVec.data()), mapIndexVec.size());
+    return hw.GetHash() == storageProofKey;
 }
 
 template<>
-uint256 CETHPATRICIABranch::SafeCheck(uint256 hash, bool optimizedProof) 
+uint256 CETHPATRICIABranch::SafeCheck(uint256 hash, bool optimizedProof)
 {
     return verifyStorageProof(hash, optimizedProof);
 }

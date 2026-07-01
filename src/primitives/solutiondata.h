@@ -21,7 +21,7 @@ class CActivationHeight
         enum {
             MAX_HEIGHT = INT_MAX,
             DEFAULT_UPGRADE_HEIGHT = MAX_HEIGHT,
-            NUM_VERSIONS = 8,   // NEVER ADD A NEW VERSION WITHOUT UPDATING THE ARRAY BELOW WITH ALL ENTRIES PRESENT
+            NUM_VERSIONS = 9,   // NEVER ADD A NEW VERSION WITHOUT UPDATING THE ARRAY BELOW WITH ALL ENTRIES PRESENT
             SOLUTION_VERUSV1 = 0,
             SOLUTION_VERUSV2 = 1,
             SOLUTION_VERUSV3 = 2,
@@ -30,6 +30,7 @@ class CActivationHeight
             SOLUTION_VERUSV5_1 = 5,
             SOLUTION_VERUSV6 = 6,
             SOLUTION_VERUSV7 = 7,
+            SOLUTION_VERUSV8 = 8,
             ACTIVATE_VERUSHASH2 = SOLUTION_VERUSV2,
             ACTIVATE_EXTENDEDSOLUTION = SOLUTION_VERUSV3,
             ACTIVATE_IDENTITY = SOLUTION_VERUSV4,
@@ -40,13 +41,18 @@ class CActivationHeight
             ACTIVATE_PBAAS_HEADER = SOLUTION_VERUSV5_1,
             ACTIVATE_STAKEHEADER = SOLUTION_VERUSV6,
             ACTIVATE_VERUSVAULT = SOLUTION_VERUSV6,
-            ACTIVATE_PBAAS = SOLUTION_VERUSV7
+            ACTIVATE_PBAAS = SOLUTION_VERUSV7,
+            ACTIVATE_PBAAS_HARDEN1 = SOLUTION_VERUSV8
         };
         bool active;
         int32_t heights[NUM_VERSIONS];
-        CActivationHeight() : heights{0, DEFAULT_UPGRADE_HEIGHT, DEFAULT_UPGRADE_HEIGHT, DEFAULT_UPGRADE_HEIGHT, DEFAULT_UPGRADE_HEIGHT, DEFAULT_UPGRADE_HEIGHT, DEFAULT_UPGRADE_HEIGHT, DEFAULT_UPGRADE_HEIGHT}, active(true) {}
+        std::vector<bool> isHeightExplicit;
+        CActivationHeight() :
+            heights{0, DEFAULT_UPGRADE_HEIGHT, DEFAULT_UPGRADE_HEIGHT, DEFAULT_UPGRADE_HEIGHT, DEFAULT_UPGRADE_HEIGHT, DEFAULT_UPGRADE_HEIGHT, DEFAULT_UPGRADE_HEIGHT, DEFAULT_UPGRADE_HEIGHT, DEFAULT_UPGRADE_HEIGHT},
+            active(true),
+            isHeightExplicit({true,true,true,true,true,true,true,true,false}) {}
 
-        void SetActivationHeight(int32_t version, int32_t height)
+        void SetActivationHeight(int32_t version, int32_t height, bool isExplicit)
         {
             assert(version < NUM_VERSIONS && version > 0);
             if (height < MAX_HEIGHT)
@@ -54,6 +60,7 @@ class CActivationHeight
                 active = true;
             }
             heights[version] = height;
+            isHeightExplicit[version] = isExplicit;
         }
 
         bool IsActivationHeight(int32_t version, int32_t height)
@@ -77,6 +84,26 @@ class CActivationHeight
                 ver = i;
             }
             return ver;
+        }
+
+        uint32_t GetVersionActivationHeight(int version, bool *isExplicit=nullptr) const
+        {
+            if (version >= NUM_VERSIONS)
+            {
+                if (isExplicit)
+                {
+                    *isExplicit = false;
+                }
+                return -1;
+            }
+            else
+            {
+                if (isExplicit)
+                {
+                    *isExplicit = isHeightExplicit[version];
+                }
+                return heights[version];
+            }
         }
 };
 
