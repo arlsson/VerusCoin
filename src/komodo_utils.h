@@ -1327,8 +1327,10 @@ uint16_t _komodo_userpass(char *username,char *password, FILE *fp)
     if ( rpcpassword != 0 )
         free(rpcpassword);
     if ( rpcportstr != 0 )
+    {
         rpcport = (uint16_t)atoi(rpcportstr);
         free(rpcportstr);
+    }
     return(rpcport);
 }
 
