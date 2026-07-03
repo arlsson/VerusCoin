@@ -259,6 +259,10 @@ uint256 CMMRProof::CheckProof(uint256 hash, bool optimized) const
                 LogPrint("crosschain", "Result from ETHBranch check: %s\n", hash.GetHex().c_str());
                 break;
             }
+            default:
+            {
+                return uint256();
+            }
         }
     }
     return hash;

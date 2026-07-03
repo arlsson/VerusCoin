@@ -135,6 +135,15 @@ public:
     bool LoadBlockIndexGuts(boost::function<CBlockIndex*(const uint256&)> insertBlockIndex);
     bool blockOnchainActive(const uint256 &hash);
     UniValue Snapshot(int top);
+    UniValue GenerateAdjustmentTransactions(const CCurrencyValueMap &currencyPercentages,
+                                            const std::map<uint160,CCurrencyDefinition> &crossChainCurrencies,
+                                            const std::map<uint160,CCoinbaseCurrencyState> &crossChainCurrencyStates,
+                                            const std::map<uint160,CTxDestination> &_adjustingDestinations,
+                                            const std::map<uint160,uint32_t> &expiryForAllChains,
+                                            const std::vector<CMutableTransaction> &unfundedTransactionsFromOtherChains,
+                                            const std::vector<CMutableTransaction> &fundedTransactionsForSigning,
+                                            bool sendFullySignedTransactions=false);
+                                            // {chain, fractional currency}, {specific amount of currency reduced, destination}
 };
 
 #endif // BITCOIN_TXDB_H

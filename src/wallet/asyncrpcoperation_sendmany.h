@@ -25,9 +25,6 @@
 
 using namespace libzcash;
 
-// A recipient is a tuple of address, amount, memo (optional if zaddr), and CScript (optional and only if taddr)
-typedef std::tuple<std::string, CAmount, std::string, CScript> SendManyRecipient;
-
 // Input JSOP is a tuple of JSOutpoint, note and amount
 typedef std::tuple<JSOutPoint, SproutNote, CAmount> SendManyInputJSOP;
 

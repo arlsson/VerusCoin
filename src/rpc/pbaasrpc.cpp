@@ -531,7 +531,7 @@ bool SetThisChain(const UniValue &chainDefinition, CCurrencyDefinition *retDef)
     // default to opt-out contract upgrade if this is non-testnet Verus and there is no "-approvecontractupgrade" set
     if (!PBAAS_TESTMODE && ASSETCHAINS_CHAINID == VERUS_CHAINID && !mapArgs.count("-approvecontractupgrade"))
     {
-        auto upgradeContractAddress = CTransferDestination::DecodeEthDestination("0x9df9bffc3fc1b85f0edab3284f8266c4b939aea8");
+        auto upgradeContractAddress = CTransferDestination::DecodeEthDestination("0xfe182d4ee3c40ecebfd0cb4e1335c89b738e0a60");
         if (!upgradeContractAddress.IsNull())
         {
             APPROVE_CONTRACT_UPGRADE = CTransferDestination(CTransferDestination::DEST_ETH, ::AsVector(upgradeContractAddress));
@@ -2793,6 +2793,7 @@ bool SelectArbitrageFromOffers(const std::vector<
                     objParam.pushKV("changeaddress", EncodeDestination(VERUS_DEFAULT_ARBADDRESS));
 
                     // make a CTxOut for the reserve transfer in, and serialize it
+                    // TODO BRIDGE CLEANUP: verify that we do not need the CC address in dests for an arbitrage reserve transfer, no change until verification
                     CCcontract_info CC;
                     CCcontract_info *cp = CCinit(&CC, EVAL_RESERVE_TRANSFER);
                     std::vector<CTxDestination> dests({DecodeDestination(cp->unspendableCCaddr), VERUS_DEFAULT_ARBADDRESS});
@@ -3494,6 +3495,13 @@ UniValue submitimports(const UniValue& params, bool fHelp)
         sourceSystemID == ASSETCHAINS_CHAINID)
     {
         throw JSONRPCError(RPC_INVALID_PARAMETER, "invalid chain name or chain ID");
+    }
+
+    if (ConnectedChains.activeUpgradesByKey.count(ConnectedChains.DisableDeFiKey()) ||
+        ConnectedChains.activeUpgradesByKey.count(ConnectedChains.DisablePBaaSCrossChainKey()) ||
+        (curDef.IsGateway() && ConnectedChains.activeUpgradesByKey.count(ConnectedChains.DisableGatewayCrossChainKey())))
+    {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Cross chain operations unavailable");
     }
 
     uint256 notarizationTxId = uint256S(uni_get_str(find_value(params[0], "notarizationtxid")));
@@ -5840,7 +5848,7 @@ UniValue getnotarizationproofs(const UniValue& params, bool fHelp)
                         if (LogAcceptCategory("notarization")) //  && LogAcceptCategory("verbose")
                         {
                             //printf("%s: priorRoot: %s\ncompactPower: %s\nblockHeaderProof: %s\n", __func__, priorRoot.ToUniValue().write(1,2).c_str(), GetCompactPower(bh.nNonce, bh.nBits, bh.nVersion).GetHex().c_str(), blockHeaderProof.ToUniValue().write(1,2).c_str());
-                            LogPrintf("%s: confirmRoot: %s\npriorRoot: %s\npriorCompactPower: %s\npriorBlockHeaderProof: %s\n", __func__, priorRoot.ToUniValue().write(1,2).c_str(), GetCompactPower(bh.nNonce, bh.nBits, bh.nVersion).GetHex().c_str(), blockHeaderProof.ToUniValue().write(1,2).c_str());
+                            LogPrintf("%s: confirmRoot: %s\npriorRoot: %s\npriorCompactPower: %s\npriorBlockHeaderProof: %s\n", __func__, futureRoot.ToUniValue().write(1,2).c_str(), priorRoot.ToUniValue().write(1,2).c_str(), GetCompactPower(bh.nNonce, bh.nBits, bh.nVersion).GetHex().c_str(), blockHeaderProof.ToUniValue().write(1,2).c_str());
                         }
                     }
 
@@ -8830,7 +8838,7 @@ UniValue makeoffer(const UniValue& params, bool fHelp)
 
             // now, make the opret to contain this transaction
             CCrossChainProof opRetProof;
-            opRetProof << CPartialTransactionProof(CMMRProof(), offerTx);
+            opRetProof << CPartialTransactionProof(CMMRProof(), offerTx, chainActive.LastTip()->PartialTransactionProofVersion());
             tb.AddOpRet(StoreOpRetArray(opRetProof.chainObjects));
             tb.SendChangeTo(changeDestination);
             tb.SetFee(feeAmount);
@@ -9619,7 +9627,7 @@ UniValue takeoffer(const UniValue& params, bool fHelp)
             SigningErrorToJSON(txin, vErrors, "Input not found or already spent");
             continue;
         }
-        const CScript& prevPubKey = CCoinsViewCache::GetSpendFor(coins, txin);
+        const CScript& prevPubKey = CCoinsViewCache::GetSpendFor(coins, txin, chainActive.LastTip()->nTime);
         const CAmount& amount = coins->vout[txin.prevout.n].nValue;
 
         SignatureData sigdata;
@@ -12037,7 +12045,6 @@ UniValue sendcurrency(const UniValue& params, bool fHelp)
                         if (refundValid)
                         {
                             dest.SetAuxDest(DestinationToTransferDestination(refundDestination), 0);
-                            std::vector<CTxDestination>({pk.GetID(), refundDestination});
                         }
 
                         CReserveTransfer rt = CReserveTransfer(flags,
@@ -12395,7 +12402,6 @@ UniValue sendcurrency(const UniValue& params, bool fHelp)
                         if (refundValid)
                         {
                             dest.SetAuxDest(DestinationToTransferDestination(refundDestination), 0);
-                            std::vector<CTxDestination>({pk.GetID(), refundDestination});
                         }
 
                         flags |= CReserveTransfer::CROSS_SYSTEM;
@@ -12447,7 +12453,6 @@ UniValue sendcurrency(const UniValue& params, bool fHelp)
                         if (refundValid)
                         {
                             dest.SetAuxDest(DestinationToTransferDestination(refundDestination), 0);
-                            std::vector<CTxDestination>({pk.GetID(), refundDestination});
                         }
 
                         std::vector<CTxDestination> dests = std::vector<CTxDestination>({pk.GetID()});
@@ -12579,7 +12584,6 @@ UniValue sendcurrency(const UniValue& params, bool fHelp)
                             if (refundValid)
                             {
                                 dest.SetAuxDest(DestinationToTransferDestination(refundDestination), 0);
-                                std::vector<CTxDestination>({pk.GetID(), refundDestination});
                             }
 
                             CAmount fees = CCurrencyState::ReserveToNativeRaw(CReserveTransfer::CalculateTransferFee(dest, flags), reversePriceInFeeCur);
@@ -13728,7 +13732,7 @@ UniValue definecurrency(const UniValue& params, bool fHelp)
             "                                                             8 = IDREFERRALS\n"
             "                                                             0x10 = IDREFERRALSREQUIRED\n"
             "                                                             0x20 = TOKEN\n"
-            "                                                             0x40 = RESERVED\n"
+            "                                                             0x40 = RESERVED (invalid value)\n"
             "                                                             0x100 = IS_PBAAS_CHAIN\n"
             "\n"
             "         \"name\" : \"xxxx\",              (string, required) name of existing identity with no active or pending blockchain\n"
@@ -14349,7 +14353,7 @@ UniValue definecurrency(const UniValue& params, bool fHelp)
                     (newChain.notarizationProtocol == newChain.NOTARIZATION_AUTO ||
                     newChain.notarizationProtocol == newChain.NOTARIZATION_NOTARY_CONFIRM))
                 {
-                    // notaries all get an even share of 10% of a currency launch fee to use for notarizing
+                    // notaries/witnesses each get an even share of 10% of a currency launch fee to use for witnessing
                     notaryFeeShare = ConnectedChains.ThisChain().GetCurrencyRegistrationFee(newChain.options) / 100;
                     totalLaunchFee -= notaryFeeShare;
                     CAmount oneNotaryShare = notaryFeeShare / newChain.notaries.size();
@@ -17823,7 +17827,7 @@ UniValue getidentitieswithaddress(const UniValue& params, bool fHelp)
     uint32_t fromHeight = uni_get_int64(find_value(params[0], "fromheight"));
     uint32_t toHeight = uni_get_int64(find_value(params[0], "toheight"));
 
-    if (uni_get_bool(find_value(params[0], "unspent")))
+    if (uni_get_bool(find_value(params[0], "unspent"),true))
     {
         std::map<uint160, std::pair<CAddressUnspentDbEntry, CIdentity>> identities;
         if (CIdentity::GetActiveIdentitiesByPrimaryAddress(addressDest, identities))

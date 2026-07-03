@@ -515,7 +515,7 @@ CAmount CCurrencyState::ReserveToNativeRaw(CAmount reserveAmount, const cpp_dec_
 
     bigAmount = price != bigZero ? (bigAmount * bigSatoshi) / price : bigZero;
     int64_t retVal;
-    if (to_int64(bigAmount, retVal))
+    if (to_int64(bigAmount, retVal) && retVal >= 0)
     {
         return retVal;
     }
@@ -610,7 +610,7 @@ CAmount CCurrencyState::NativeToReserveRaw(CAmount nativeAmount, const cpp_dec_f
     cpp_dec_float_50 bigAmount(std::to_string(nativeAmount));
     int64_t retVal;
     cpp_dec_float_50 bigReserves = (bigAmount * price) / bigSatoshi;
-    if (to_int64(bigReserves, retVal))
+    if (to_int64(bigReserves, retVal) && retVal >= 0)
     {
         return retVal;
     }

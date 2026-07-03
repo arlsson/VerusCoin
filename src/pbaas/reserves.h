@@ -223,7 +223,10 @@ public:
         CONVERT = 2,
         PRECONVERT = 4,
         FEE_OUTPUT = 8,                     // one per import, amount must match total percentage of fees for exporter, no pre-convert allowed
-        RESERVED = 0x10,                    // reserved
+        PROHIBITED_DISGORGEMENT = 0x10,     // normally prohibited, but with refund, considered disgorgement and allowed without input funds
+                                            //  this is only present to use for the bridge exploit recovery, and it will only be enabled during
+                                            //  the same small window of time on all blockchains. at all other times, it is prohibited on the
+                                            //  network.
         MINT_CURRENCY = 0x20,               // set when this output is being minted on import
         CROSS_SYSTEM = 0x40,                // if this is set, there is a systemID serialized and deserialized as well for destination
         BURN_CHANGE_PRICE = 0x80,           // this output is being burned on import and will change the price
@@ -490,6 +493,11 @@ public:
     bool IsArbitrageOnly() const
     {
         return flags & ARBITRAGE_ONLY;
+    }
+
+    bool IsProhibitedDisgorgement() const
+    {
+        return flags & PROHIBITED_DISGORGEMENT;
     }
 
     CReserveTransfer GetRefundTransfer(bool clearCrossSystem=true, bool recoverFees=false) const;
@@ -1118,6 +1126,11 @@ public:
         return flags & FLAG_HASSUPPLEMENT;
     }
 
+    bool IsEvidenceOnly() const
+    {
+        return flags & FLAG_EVIDENCEONLY;
+    }
+
     bool IsValid() const
     {
         return nVersion >= VERSION_FIRST &&
@@ -1387,6 +1400,11 @@ public:
         try
         {
             ss >> outval;
+            if (ss.fail())
+            {
+                outval = -1;
+                return false;
+            }
             return true;
         }
         catch(const std::exception& e)
@@ -1413,11 +1431,10 @@ public:
                                         CCurrencyState &newState,
                                         bool promoteExchangeRate,                       // true to compensate for library issue & false to remain compatible with on-chain data
                                         bool layerFixActive,                            // true to enable layer calc fix
+                                        bool enhancedUnderflowCheck,                    // true to enable layer calc fix
                                         CValidationState &validationState,
                                         const std::vector<std::vector<CAmount>> *pCrossConversions=nullptr,
                                         std::vector<CAmount> *pViaPrices=nullptr) const;
-
-    CAmount CalculateConversionFee(CAmount inputAmount, bool convertToNative=false, int32_t reserveIndex=0) const;
 
     CAmount ReserveToNative(CAmount reserveAmount, int32_t reserveIndex, bool promoteExchangeRate=true) const;
     CAmount ReserveToNative(const CCurrencyValueMap &reserveAmounts) const;
@@ -1871,11 +1888,6 @@ public:
     CCurrencyValueMap ReserveFees(const uint160 &nativeID=uint160()) const;
     CAmount NativeFees() const;
 
-    CAmount AllFeesAsNative(const CCurrencyState &currencyState) const;
-    CAmount AllFeesAsNative(const CCurrencyState &currencyState, const std::vector<CAmount> &exchangeRates) const;
-    CCurrencyValueMap AllFeesAsReserve(const CCurrencyState &currencyState, int defaultReserve=0) const;
-    CCurrencyValueMap AllFeesAsReserve(const CCurrencyState &currencyState, const std::vector<CAmount> &exchangeRates, int defaultReserve=0) const;
-
     // does not check for errors
     void AddReserveInput(const uint160 &currency, CAmount value);
     void AddReserveOutput(const uint160 &currency, CAmount value);
@@ -2039,5 +2051,10 @@ bool IsFeePoolInput(const CScript &scriptSig);
 bool PrecheckFeePool(const CTransaction &tx, int32_t outNum, CValidationState &state, uint32_t height);
 bool PrecheckReserveTransfer(const CTransaction &tx, int32_t outNum, CValidationState &state, uint32_t height);
 bool PrecheckReserveDeposit(const CTransaction &tx, int32_t outNum, CValidationState &state, uint32_t height);
+CAmount GetMinRelayFeeByOutputs(const CReserveTransactionDescriptor &txDesc, const CTransaction &tx, CValidationState &state, CAmount identityFeeFactor);
+CAmount GetMinRelayFeeByOutputs(const CTransaction &tx, CValidationState &state, CAmount identityFeeFactor);
+
+bool IsVerusActive();
+bool IsVerusMainnetActive();
 
 #endif // PBAAS_RESERVES_H

@@ -1,5 +1,6 @@
 /******************************************************************************
  * Copyright © 2014-2018 The SuperNET Developers.                             *
+ * Copyright © 2019-2021 The Verus Developers.                             *
  *                                                                            *
  * See the AUTHORS, DEVELOPER-AGREEMENT and LICENSE files at                  *
  * the top-level directory of this distribution for the individual copyright  *

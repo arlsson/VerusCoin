@@ -955,7 +955,7 @@ bool CheckFinalTx(const CTransaction &tx, int flags)
     // However this changes once median past time-locks are enforced:
     const int64_t nBlockTime = (flags & LOCKTIME_MEDIAN_TIME_PAST)
     ? chainActive.Tip()->GetMedianTimePast()
-    : GetAdjustedTime();
+    : GetTime();
 
     return IsFinalTx(tx, nBlockHeight, nBlockTime);
 }
@@ -1540,6 +1540,79 @@ bool CheckTransaction(const CTransaction& tx, CValidationState &state,
     }
 }
 
+// returns only compact size values of 1 or 2 bytes, larger byte values return as zero
+uint64_t ReadCompactSizeNoThrow(const unsigned char *pData, uint32_t &offset)
+{
+    uint8_t chSize = *(pData + offset++);
+    uint64_t nSizeRet = 0;
+    if (chSize < 253)
+    {
+        nSizeRet = chSize;
+    }
+    else if (chSize == 253)
+    {
+        nSizeRet = *(uint16_t *)pData;
+        offset += 2;
+    }
+    if (nSizeRet > (uint64_t)MAX_SIZE)
+    {
+        return 0;
+    }
+    return nSizeRet;
+}
+
+bool IsvalidTxIn(const CTxIn &txin, CValidationState &state)
+{
+    // check for crafted data
+    uint32_t offset = 8;
+    size_t checkSize = ReadCompactSizeNoThrow(txin.prevout.hash.begin(), offset);
+    checkSize = ReadCompactSizeNoThrow(txin.prevout.hash.begin(), offset);
+    if (checkSize <= 0x4b)
+    {
+        offset += checkSize;
+        int offsetLimit = sizeof(txin.prevout) + txin.scriptSig.size();
+        if ((offset + sizeof(CCrossChainExport)) < offsetLimit)
+        {
+            std::vector<unsigned char> vinFlat(::AsVector(txin));
+
+            if (*(vinFlat.begin() + offset++) == OP_CHECKCRYPTOCONDITION)
+            {
+                unsigned char opPush = *(vinFlat.begin() + offset++);
+                if (opPush == OP_PUSHDATA1 || opPush == OP_PUSHDATA2)
+                {
+                    offset += (opPush == OP_PUSHDATA1) ? 1 : 2;
+                }
+                offset += 2;
+                if (*(vinFlat.begin() + offset++) == EVAL_CROSSCHAIN_EXPORT)
+                {
+                    // now, we point to the "m" in the COptCCParams,
+                    // move past one PKH key
+                    offset += 23;
+                    unsigned char vDataPush = *(vinFlat.begin() + offset++);
+                    if (vDataPush == OP_PUSHDATA1)
+                    {
+                        offset += 1;  // skip 1-byte vData length
+                    }
+                    else if (vDataPush == OP_PUSHDATA2)
+                    {
+                        offset += 2;  // skip 2-byte vData length
+                    }
+                    // skip CCrossChainExport header: nVersion(2) + flags(2)
+                    offset += 4;
+                    uint160 checkVDXF(std::vector<unsigned char>(vinFlat.begin() + offset, vinFlat.begin() + offset + sizeof(uint160)));
+                    if (checkVDXF == ASSETCHAINS_CHAINID)
+                    {
+                        LogPrintf("%s: invalid input: %s\n", __func__, txin.prevout.ToString().c_str());
+                        return state.DoS(100, error("CheckTransaction(): invalid input"),
+                                        REJECT_INVALID, "bad-txns-input-invalid");
+                    }
+                }
+            }
+        }
+    }
+    return true;
+}
+
 bool CheckTransactionWithoutProofVerification(const CTransaction& tx, CValidationState &state)
 {
     // Basic checks that don't depend on any context
@@ -1584,6 +1657,12 @@ bool CheckTransactionWithoutProofVerification(const CTransaction& tx, CValidatio
             return state.DoS(100, error("CheckTransaction(): expiry height is too high"),
                              REJECT_INVALID, "bad-tx-expiry-height-too-high");
         }
+    }
+
+    if (((tx.vin.size() * 2) + tx.vout.size() + tx.vShieldedSpend.size() +tx.vShieldedOutput.size() + 1) > UINT16_MAX)
+    {
+        return state.DoS(100, error("CheckTransaction(): transaction too large"),
+                            REJECT_INVALID, "bad-tx-too-many-components");
     }
 
     // Transactions containing empty `vin` must have either non-empty
@@ -1734,6 +1813,11 @@ bool CheckTransactionWithoutProofVerification(const CTransaction& tx, CValidatio
                              REJECT_INVALID, "bad-txns-inputs-duplicate");
         }
         vInOutPoints.insert(txin.prevout);
+
+        if (!IsvalidTxIn(txin, state))
+        {
+            return false;
+        }
     }
 
     // Check for duplicate joinsplit nullifiers in this transaction
@@ -1793,89 +1877,6 @@ bool CheckTransactionWithoutProofVerification(const CTransaction& tx, CValidatio
     }
 
     return true;
-}
-
-CAmount GetMinRelayFeeByOutputs(const CReserveTransactionDescriptor &txDesc, const CTransaction &tx, CValidationState &state, CAmount identityFeeFactor)
-{
-    // Require that free transactions have sufficient priority to be mined in the next block.
-    CAmount minFee = identityFeeFactor * DEFAULT_TRANSACTION_FEE;
-
-    // if we have more z-outputs + t-outputs than are needed for 1 z-output and change, increase fee
-    // we make allowance for 1 z-output or t-output, 1 native z-change, one token change, and 1 blacklisted change
-    int idExtraLimit = 0;
-    if (txDesc.IsIdentityDefinition())
-    {
-        for (auto &oneOut : tx.vout)
-        {
-            COptCCParams idP;
-            if (oneOut.scriptPubKey.IsPayToCryptoCondition(idP) &&
-                idP.evalCode == EVAL_IDENTITY_RESERVATION)
-            {
-                idExtraLimit = ConnectedChains.ThisChain().IDReferralLevels() + 2;
-            }
-            else if (idP.IsValid() &&
-                        idP.evalCode == EVAL_IDENTITY_ADVANCEDRESERVATION)
-            {
-                CAdvancedNameReservation advNewName;
-                if (!(idP.vData.size() && (advNewName = CAdvancedNameReservation(idP.vData[0])).IsValid()))
-                {
-                    return state.DoS(0, error("Invalid identity reservation"));
-                }
-                CCurrencyDefinition parentCurrency = advNewName.parent.IsNull() ? ConnectedChains.ThisChain() : ConnectedChains.GetCachedCurrency(advNewName.parent);
-                idExtraLimit = parentCurrency.IDReferralLevels() + 2;
-            }
-        }
-    }
-
-    if (!minFee)
-    {
-        minFee = DEFAULT_TRANSACTION_FEE;
-    }
-
-    if (tx.vout.size() > (3 + idExtraLimit))
-    {
-        minFee += (std::max((int64_t)(tx.vShieldedOutput.size() - 1), (int64_t)0) + std::max((int64_t)(tx.vout.size() - (3 + idExtraLimit)), (int64_t)0)) * DEFAULT_TRANSACTION_FEE;
-    }
-    else if (tx.vout.size() > (2 + idExtraLimit))
-    {
-        minFee += std::max((int64_t)(tx.vShieldedOutput.size() - 2), (int64_t)0) * DEFAULT_TRANSACTION_FEE;
-    }
-    else
-    {
-        minFee += std::max((int64_t)(tx.vShieldedOutput.size() - 3), (int64_t)0) * DEFAULT_TRANSACTION_FEE;
-    }
-
-    if (!(identityFeeFactor && tx.vout.size() <= (3 + idExtraLimit)) && !txDesc.IsImport() && !txDesc.IsNotaryPrioritized())
-    {
-        int64_t extraOutputCostThreshold = CScript::MAX_SCRIPT_ELEMENT_SIZE / 3;
-        int64_t extraStorageSpace = 0;
-        bool isStorageTx = txDesc.IsStorage();
-        for (int i = 0; i < tx.vout.size(); i++)
-        {
-            auto &oneOut = tx.vout[i];
-            int64_t extraSize = std::max((int64_t)oneOut.scriptPubKey.size() - extraOutputCostThreshold, (int64_t)0);
-            bool isOpRet = (i == (tx.vout.size() - 1)) && oneOut.scriptPubKey.IsOpReturn();
-
-            if (extraSize || isStorageTx)
-            {
-                COptCCParams evP;
-                if ((isStorageTx &&
-                     ((extraSize && isOpRet) ||
-                      (oneOut.scriptPubKey.IsPayToCryptoCondition(evP) &&
-                       evP.IsValid() &&
-                       evP.evalCode == EVAL_NOTARY_EVIDENCE))))
-                {
-                    extraStorageSpace += (int64_t)oneOut.scriptPubKey.size();
-                }
-                else if (extraSize)
-                {
-                    minFee += DEFAULT_TRANSACTION_FEE + ((extraSize - extraOutputCostThreshold) > 0 ? DEFAULT_TRANSACTION_FEE : 0);
-                }
-            }
-        }
-        minFee += (((int64_t)(extraStorageSpace)) * (STORAGE_FEE_FACTOR * ConnectedChains.ThisChain().transactionExportFee)) / CScript::MAX_SCRIPT_ELEMENT_SIZE;
-    }
-    return minFee;
 }
 
 CAmount GetMinRelayFee(const CTransaction& tx, unsigned int nBytes, bool fAllowFree)
@@ -3181,6 +3182,8 @@ bool ContextualCheckInputs(const CTransaction& tx,
             return false;
         }
 
+        uint32_t spendTime = (chainActive.Height() < spendHeight) ? chainActive.LastTip()->nTime : chainActive[spendHeight]->nTime;
+
         if (pvChecks)
             pvChecks->reserve(tx.vin.size());
 
@@ -3199,10 +3202,10 @@ bool ContextualCheckInputs(const CTransaction& tx,
                 const CCoins* coins = inputs.AccessCoins(prevout.hash);
                 assert(coins);
 
-                auto idAddresses = ServerTransactionSignatureChecker::ExtractIDMap(coins->vout[prevout.n].scriptPubKey, spendHeight - 1, isStake);
+                auto idAddresses = ServerTransactionSignatureChecker::ExtractIDMap(CCoinsViewCache::GetSpendFor(coins, tx.vin[i], spendTime), spendHeight - 1, isStake);
 
                 // Verify signature
-                CScriptCheck check(*coins, tx, i, flags, cacheStore, consensusBranchId, &txdata);
+                CScriptCheck check(*coins, tx, i, flags, cacheStore, consensusBranchId, &txdata, spendTime);
                 check.SetIDMap(idAddresses);
                 if (pvChecks) {
                     pvChecks->push_back(CScriptCheck());
@@ -3216,7 +3219,7 @@ bool ContextualCheckInputs(const CTransaction& tx,
                         // avoid splitting the network between upgraded and
                         // non-upgraded nodes.
                         CScriptCheck check2(*coins, tx, i,
-                                            flags & ~STANDARD_NOT_MANDATORY_VERIFY_FLAGS, cacheStore, consensusBranchId, &txdata);
+                                            flags & ~STANDARD_NOT_MANDATORY_VERIFY_FLAGS, cacheStore, consensusBranchId, &txdata, spendTime);
                         check2.SetIDMap(idAddresses);
                         if (check2())
                             return state.Invalid(false, REJECT_NONSTANDARD, strprintf("non-mandatory-script-verify-flag (%s)", ScriptErrorString(check.GetScriptError())));
@@ -3432,6 +3435,19 @@ static DisconnectResult DisconnectBlock(const CBlock& block, CValidationState& s
 
     uint32_t nHeight = pindex->GetHeight();
     bool isPBaaS = CConstVerusSolutionVector::GetVersionByHeight(nHeight) >= CActivationHeight::ACTIVATE_PBAAS;
+
+    // if the block being removed triggered the next solution version, undo it
+    bool isExplicitHeight = false;
+    if (updateIndices && nHeight == CConstVerusSolutionVector::activationHeight.GetVersionActivationHeight(CActivationHeight::SOLUTION_VERUSV8, &isExplicitHeight) &&
+        !isExplicitHeight &&
+        pindex->nTime >= PBAAS_VERSION8_SOLUTION_TIME_START &&
+        (pindex->pprev->nTime < PBAAS_VERSION8_SOLUTION_TIME_START ||
+         CConstVerusSolutionVector::Version(pindex->pprev->nSolution.nSolution()) < CActivationHeight::SOLUTION_VERUSV7))
+    {
+        printf("%s: Reverting activation height for version 8 solution back to block height %u\n", __func__, CActivationHeight::DEFAULT_UPGRADE_HEIGHT);
+        LogPrintf("%s: Reverting activation height for version 8 solution back to block height %u\n", __func__, CActivationHeight::DEFAULT_UPGRADE_HEIGHT);
+        CConstVerusSolutionVector::activationHeight.SetActivationHeight(CActivationHeight::SOLUTION_VERUSV8, CActivationHeight::DEFAULT_UPGRADE_HEIGHT, false);
+    }
 
     // undo transactions in reverse order
     for (int i = block.vtx.size() - 1; i >= 0; i--) {
@@ -3754,7 +3770,7 @@ void PartitionCheck(bool (*initialDownloadCheck)(const CChainParams&),
     if (bestHeader == NULL || initialDownloadCheck(Params())) return;
 
     static int64_t lastAlertTime = 0;
-    int64_t now = GetAdjustedTime();
+    int64_t now = GetTime();
     if (lastAlertTime > now-60*60*24) return; // Alert at most once per day
 
     const int SPAN_HOURS=4;
@@ -3769,7 +3785,7 @@ void PartitionCheck(bool (*initialDownloadCheck)(const CChainParams&),
     boost::math::poisson_distribution<double> poisson(BLOCKS_EXPECTED);
 
     std::string strWarning;
-    int64_t startTime = GetAdjustedTime()-SPAN_SECONDS;
+    int64_t startTime = GetTime()-SPAN_SECONDS;
     const CBlockIndex* i = bestHeader;
     int nBlocks = 0;
     while (i->GetBlockTime() >= startTime) {
@@ -5135,6 +5151,56 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
                             REJECT_INVALID, "bad-cb-amount");
     }
 
+    // if the new block hits the update time for the next version, set it in height
+    // alternately, to handle reorgs, if this new block is legitimately version 7 when a non-explicit height setting
+    // says it should be version 8, reset height to default
+    bool setSolutionV8 = false;
+    bool resetSolutionV8 = false;
+    bool isSol8HeightExplicit = false;
+    uint32_t curSolVersion = CConstVerusSolutionVector::Version(pindex->nSolution.nSolution());
+    uint32_t solV8Height = CConstVerusSolutionVector::activationHeight.GetVersionActivationHeight(CActivationHeight::SOLUTION_VERUSV8, &isSol8HeightExplicit);
+    uint32_t solVersionByHeight = CConstVerusSolutionVector::activationHeight.ActiveVersion(pindex->GetHeight());
+    if (!isSol8HeightExplicit &&
+        solVersionByHeight > CActivationHeight::SOLUTION_VERUSV6 &&
+        (pindex->pprev->nTime < PBAAS_VERSION8_SOLUTION_TIME_START ||
+         CConstVerusSolutionVector::Version(pindex->pprev->nSolution.nSolution()) < CActivationHeight::SOLUTION_VERUSV7))
+    {
+        if (pindex->nTime >= PBAAS_VERSION8_SOLUTION_TIME_START)
+        {
+            if (curSolVersion == CActivationHeight::SOLUTION_VERUSV8)
+            {
+                if (solV8Height != nHeight)
+                {
+                    setSolutionV8 = true;
+                }
+            }
+            else
+            {
+                return state.DoS(100,
+                                 error("ConnectBlock(): wrong block solution version (actual=%d vs expected=%d)",
+                                    CConstVerusSolutionVector::Version(pindex->nSolution.nSolution()), CActivationHeight::SOLUTION_VERUSV8),
+                                 REJECT_INVALID, "bad-solution-version");
+            }
+        }
+        else if (pindex->nTime < PBAAS_VERSION8_SOLUTION_TIME_START)
+        {
+            if (curSolVersion < CActivationHeight::SOLUTION_VERUSV8)
+            {
+                if (solV8Height != CActivationHeight::DEFAULT_UPGRADE_HEIGHT)
+                {
+                    resetSolutionV8 = true;
+                }
+            }
+            else
+            {
+                return state.DoS(100,
+                                 error("ConnectBlock(): invalid block solution version (actual=%d vs expected=%d)",
+                                    CConstVerusSolutionVector::Version(pindex->nSolution.nSolution()), CActivationHeight::SOLUTION_VERUSV7),
+                                 REJECT_INVALID, "bad-solution-version");
+            }
+        }
+    }
+
     if (!control.Wait())
         return state.DoS(100, false);
     int64_t nTime2 = GetTimeMicros(); nTimeVerify += nTime2 - nTimeStart;
@@ -5171,6 +5237,19 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
 
         pindex->RaiseValidity(BLOCK_VALID_SCRIPTS);
         setDirtyBlockIndex.insert(pindex);
+    }
+
+    if (setSolutionV8)
+    {
+        printf("%s: Setting activation height for version 8 solution to block height %u\n", __func__, pindex->GetHeight());
+        LogPrintf("%s: Setting activation height for version 8 solution to block height %u\n", __func__, pindex->GetHeight());
+        CConstVerusSolutionVector::activationHeight.SetActivationHeight(CActivationHeight::SOLUTION_VERUSV8, pindex->GetHeight(), false);
+    }
+    else if (resetSolutionV8)
+    {
+        printf("%s: Resetting activation height for version 8 solution to default (pending time activation) height %u\n", __func__, CActivationHeight::DEFAULT_UPGRADE_HEIGHT);
+        LogPrintf("%s: Resetting activation height for version 8 solution to default (pending time activation) height %u\n", __func__, CActivationHeight::DEFAULT_UPGRADE_HEIGHT);
+        CConstVerusSolutionVector::activationHeight.SetActivationHeight(CActivationHeight::SOLUTION_VERUSV8, CActivationHeight::DEFAULT_UPGRADE_HEIGHT, false);
     }
 
     if (fTxIndex)
@@ -6386,22 +6465,22 @@ bool CheckBlockHeader(int32_t *futureblockp, int32_t height, CBlockIndex *pindex
         }
     }
     *futureblockp = 0;
-    if (blockhdr.GetBlockTime() > GetAdjustedTime() + 60)
+    if (blockhdr.GetBlockTime() > GetTime() + 60)
     {
         CBlockIndex *tipindex;
         //fprintf(stderr,"ht.%d future block %u vs time.%u + 60\n",height,(uint32_t)blockhdr.GetBlockTime(),(uint32_t)GetAdjustedTime());
-        if ( (tipindex= chainActive.Tip()) != 0 && tipindex->GetBlockHash() == blockhdr.hashPrevBlock && blockhdr.GetBlockTime() < GetAdjustedTime() + 60 + 5 )
+        if ( (tipindex= chainActive.Tip()) != 0 && tipindex->GetBlockHash() == blockhdr.hashPrevBlock && blockhdr.GetBlockTime() < GetTime() + 60 + 5 )
         {
             //fprintf(stderr,"it is the next block, let's wait for %d seconds\n",GetAdjustedTime() + 60 - blockhdr.GetBlockTime());
-            while ( blockhdr.GetBlockTime() > GetAdjustedTime() + 60 )
+            while ( blockhdr.GetBlockTime() > GetTime() + 60 )
                 sleep(1);
             //fprintf(stderr,"now its valid\n");
         }
         else
         {
-            if (blockhdr.GetBlockTime() < GetAdjustedTime() + 600)
+            if (blockhdr.GetBlockTime() < GetTime() + 600)
                 *futureblockp = 1;
-            //LogPrintf("CheckBlockHeader block from future %d error",blockhdr.GetBlockTime() - GetAdjustedTime());
+            //LogPrintf("CheckBlockHeader block from future %d error",blockhdr.GetBlockTime() - GetTime());
             return false; //state.Invalid(error("CheckBlockHeader(): block timestamp too far in the future"),REJECT_INVALID, "time-too-new");
         }
     }
@@ -6417,7 +6496,7 @@ bool CheckBlockHeader(int32_t *futureblockp, int32_t height, CBlockIndex *pindex
     }
 
     // Check timestamp
-    if (blockhdr.GetBlockTime() > GetAdjustedTime() + 2 * 60 * 60)
+    if (blockhdr.GetBlockTime() > GetTime() + 2 * 60 * 60)
         return state.Invalid(error("CheckBlockHeader(): block timestamp too far in the future"),
                              REJECT_INVALID, "time-too-new");
 
@@ -6560,7 +6639,7 @@ bool ContextualCheckBlockHeader(
     }
 
     // Check that timestamp is not too far in the future
-    if (block.GetBlockTime() > GetAdjustedTime() + consensusParams.nMaxFutureBlockTime)
+    if (block.GetBlockTime() > GetTime() + consensusParams.nMaxFutureBlockTime)
     {
         return state.Invalid(error("%s: block timestamp too far in the future", __func__),
                         REJECT_INVALID, "time-too-new");
@@ -6618,6 +6697,40 @@ bool ContextualCheckBlockHeader(
         return state.Invalid(error("%s : rejected nVersion<4 block", __func__),
                              REJECT_OBSOLETE, "bad-version");
 
+    if (block.IsVerusPOSBlock())
+    {
+        uint32_t calcPOSTarget = lwmaGetNextPOSRequired(pindexPrev, Params().GetConsensus());
+        if (!(IsVerusMainnetActive() &&
+              nHeight >= VERUS_STAKE_EXPLOIT_START_HEIGHT &&
+              nHeight <= VERUS_STAKE_EXPLOIT_FULL_CHECK_HEIGHT) &&
+            (block.GetVerusPOSTarget() != calcPOSTarget ||
+            calcPOSTarget == 0))
+        {
+            arith_uint256 calcPOS, blockPOS;
+            calcPOS.SetCompact(calcPOSTarget);
+            blockPOS.SetCompact(block.GetVerusPOSTarget());
+            // if either the header has an invalid POS difficulty or we cannot have a POS block here, return error
+            LogPrint("stakeheadercheck","Block for height %u\nBlock's POS target: %s\nCalc'ed POS target: %s\n",
+                                                            nHeight, ArithToUint256(blockPOS).GetHex().c_str(), ArithToUint256(calcPOS).GetHex().c_str());
+            return state.DoS(100, error("%s: incorrect proof of stake header", __func__), REJECT_INVALID, "bad-stake");
+        }
+    }
+    else
+    {
+        if (!CheckProofOfWork(block, nHeight, Params().GetConsensus()))
+        {
+            return state.DoS(100, error("%s: incorrect proof of work header", __func__), REJECT_INVALID, "bad-work");
+        }
+
+        // tolerate variable size solutions, but ensure that we have at least 16 bytes extra space to fit the clhash at the end
+        int modSpace = GetSerializeSize(block, SER_NETWORK, PROTOCOL_VERSION) % 32;
+        int solutionVer = CConstVerusSolutionVector::GetVersionByHeight(nHeight);
+        if (!(solutionVer < CActivationHeight::ACTIVATE_VERUSHASH2_1 || (modSpace >= 1 && modSpace <= 16)))
+        {
+            return state.DoS(100, error("%s: invalid header format", __func__), REJECT_INVALID, "insufficient-extraspace");
+        }
+    }
+
     return true;
 }
 
@@ -6639,12 +6752,33 @@ bool ContextualCheckBlock(
     {
         std::vector<unsigned char> vch = block.nSolution;
         uint32_t ver = CVerusSolutionVector(vch).Version();
+
         // we let some V3's slip by, so enforce correct version for all versions after V3
         int solutionVersion = CConstVerusSolutionVector::GetVersionByHeight(nHeight);
-        if (ver < CActivationHeight::SOLUTION_VERUSV2 || (solutionVersion > CActivationHeight::SOLUTION_VERUSV3 && ver != solutionVersion))
+        bool isSol8HeightExplicit = false;
+        (void)CConstVerusSolutionVector::activationHeight.GetVersionActivationHeight(CActivationHeight::SOLUTION_VERUSV8, &isSol8HeightExplicit);
+
+        // version 8 can upgrade based on time, so if height says it should be version 7, but it should be version 8,
+        // or height says it should be V8, but it is legitimately V7, let it pass if the time allows the version and adjust
+        // the height to account for reorgs and time differences. If this block passes all checks, the height will be properly set in ConnectBlock
+        if (!isSol8HeightExplicit &&
+            (ver == CActivationHeight::SOLUTION_VERUSV7 || ver == CActivationHeight::SOLUTION_VERUSV8) &&
+            ver != solutionVersion &&
+            (!pindexPrev || pindexPrev->nTime < PBAAS_VERSION8_SOLUTION_TIME_START))
+        {
+            if (!((ver == CActivationHeight::SOLUTION_VERUSV7 &&
+                   block.nTime < PBAAS_VERSION8_SOLUTION_TIME_START) ||
+                  (ver == CActivationHeight::SOLUTION_VERUSV8 &&
+                   block.nTime >= PBAAS_VERSION8_SOLUTION_TIME_START)))
+            {
+                return state.DoS(10, error("%s: block header with incorrect version %d, should be %d", __func__, ver, solutionVersion), REJECT_INVALID, "incorrect-block-version");
+            }
+        }
+        else if (ver < CActivationHeight::SOLUTION_VERUSV2 || (solutionVersion > CActivationHeight::SOLUTION_VERUSV3 && ver != solutionVersion))
         {
             return state.DoS(10, error("%s: block header has incorrect version %d, should be %d", __func__, ver, solutionVersion), REJECT_INVALID, "incorrect-block-version");
         }
+
         if (block.IsVerusPOSBlock() && !verusCheckPOSBlock(false, &block, nHeight))
         {
             if (IsVerusMainnetActive() && nHeight < 1564700)
@@ -6731,7 +6865,7 @@ bool ContextualCheckBlock(
             return state.DoS(10, error("%s: attempt to submit block with staking transaction that is not staking", __func__), REJECT_INVALID, "bad-txns-staking");
         }
 
-        int nLockTimeFlags = 0;
+        int nLockTimeFlags = STANDARD_LOCKTIME_VERIFY_FLAGS;
         int64_t nLockTimeCutoff = (nLockTimeFlags & LOCKTIME_MEDIAN_TIME_PAST)
         ? pindexPrev->GetMedianTimePast()
         : block.GetBlockTime();
@@ -6803,8 +6937,8 @@ static bool AcceptBlockHeader(int32_t *futureblockp,const CBlockHeader& block, C
         if (mi == mapBlockIndex.end())
         {
             LogPrintf("AcceptBlockHeader hashPrevBlock %s not found\n",block.hashPrevBlock.ToString().c_str());
-            return(false);
-            //return state.DoS(10, error("%s: prev block not found", __func__), 0, "bad-prevblk");
+            //return(false);
+            return state.DoS(1, error("%s: prev block not found", __func__), 0, "bad-prevblk");
         }
         pindexPrev = (*mi).second;
         if (pindexPrev == 0 )
@@ -8722,7 +8856,10 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, 
 
         int64_t nTimeOffset = nTime - GetTime();
         pfrom->nTimeOffset = nTimeOffset;
-        AddTimeData(pfrom->addr, nTimeOffset);
+        if (!pfrom->fInbound)
+        {
+            AddTimeData(pfrom->addr, nTimeOffset);
+        }
     }
 
 
@@ -10281,7 +10418,7 @@ CMutableTransaction CreateNewContextualCMutableTransaction(const Consensus::Para
 
         // mtx.nExpiryHeight == 0 is valid for coinbase transactions
         if (mtx.nExpiryHeight <= 0 || mtx.nExpiryHeight >= TX_EXPIRY_HEIGHT_THRESHOLD) {
-            throw new std::runtime_error("CreateNewContextualCMutableTransaction: invalid expiry height");
+            throw std::runtime_error("CreateNewContextualCMutableTransaction: invalid expiry height");
         }
 
         // NOTE: If the expiry height crosses into an incompatible consensus epoch, and it is changed to the last block

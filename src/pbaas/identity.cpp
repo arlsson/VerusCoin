@@ -23,7 +23,8 @@ extern CTxMemPool mempool;
 bool IsValidBlockOneCoinbase(const std::vector<CTxOut> &outputs,
                             const CRPCChainData &launchChain,
                             const CCurrencyDefinition &newChainCurrency,
-                            CValidationState &state);
+                            CValidationState &state,
+                            bool &knownCapped);
 
 CCommitmentHash::CCommitmentHash(const CTransaction &tx)
 {
@@ -2648,7 +2649,7 @@ bool PrecheckIdentityPrimary(const CTransaction &tx, int32_t outNum, CValidation
             std::string errorOut = "Primary identity output condition of \"" + identity.name + "\" is neither revoked nor spendable by self";
             return state.Error(errorOut.c_str());
         }
-        for (int i = 1; i < p.vData.size() - 1; i++)
+        for (int i = 1; i < ((int)p.vData.size() - 1); i++)
         {
             COptCCParams oneP(p.vData[i]);
             // must be valid and composable
@@ -2777,7 +2778,7 @@ bool PrecheckIdentityPrimary(const CTransaction &tx, int32_t outNum, CValidation
                 std::string errorOut = "Primary identity output condition of \"" + identity.name + "\" is not spendable by self";
                 return state.Error(errorOut.c_str());
             }
-            for (int i = 1; i < p.vData.size() - 1; i++)
+            for (int i = 1; i < ((int)p.vData.size() - 1); i++)
             {
                 COptCCParams oneP(p.vData[i]);
                 // must be valid and composable
@@ -2887,8 +2888,9 @@ bool PrecheckIdentityPrimary(const CTransaction &tx, int32_t outNum, CValidation
                     }
                     if (i == outNum)
                     {
+                        bool knownCapped = false;
                         if (ConnectedChains.FirstNotaryChain().IsValid() &&
-                            IsValidBlockOneCoinbase(tx.vout, ConnectedChains.FirstNotaryChain(), ConnectedChains.ThisChain(), state))
+                            IsValidBlockOneCoinbase(tx.vout, ConnectedChains.FirstNotaryChain(), ConnectedChains.ThisChain(), state, knownCapped))
                         {
                             return true;
                         }
@@ -3145,7 +3147,7 @@ bool ValidateIdentityRevoke(struct CCcontract_info *cp, Eval* eval, const CTrans
 
     COptCCParams oldRevokeP, newRevokeP;
 
-    for (int i = 1; i < q.vData.size() - 1; i++)
+    for (int i = 1; i < ((int64_t)q.vData.size() - 1); i++)
     {
         COptCCParams oneP(q.vData[i]);
         // must be valid and composable
@@ -3177,7 +3179,7 @@ bool ValidateIdentityRevoke(struct CCcontract_info *cp, Eval* eval, const CTrans
     {
         sourceTx.vout[spendingTx.vin[nIn].prevout.n].scriptPubKey.IsPayToCryptoCondition(p);
 
-        for (int i = 1; i < p.vData.size() - 1; i++)
+        for (int i = 1; i < ((int)p.vData.size() - 1); i++)
         {
             COptCCParams oneP(p.vData[i]);
             if (oneP.evalCode == EVAL_IDENTITY_REVOKE)
@@ -3359,7 +3361,7 @@ bool ValidateIdentityRecover(struct CCcontract_info *cp, Eval* eval, const CTran
 
     COptCCParams oldRecoverP, newRecoverP;
 
-    for (int i = 1; i < q.vData.size() - 1; i++)
+    for (int i = 1; i < ((int64_t)q.vData.size() - 1); i++)
     {
         COptCCParams oneP(q.vData[i]);
         // must be valid and composable
@@ -3402,7 +3404,7 @@ bool ValidateIdentityRecover(struct CCcontract_info *cp, Eval* eval, const CTran
 
         sourceTx.vout[spendingTx.vin[nIn].prevout.n].scriptPubKey.IsPayToCryptoCondition(p);
 
-        for (int i = 1; i < p.vData.size() - 1; i++)
+        for (int i = 1; i < ((int)p.vData.size() - 1); i++)
         {
             COptCCParams oneP(p.vData[i]);
             if (oneP.evalCode == EVAL_IDENTITY_RECOVER)

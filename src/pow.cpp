@@ -214,23 +214,14 @@ unsigned int lwmaCalculateNextWorkRequired(const CBlockIndex* pindexLast, const 
     return nextTarget.GetCompact();
 }
 
-// the goal is to keep POS at a solve time that is a ratio of block time units. the low resolution makes a stable solution more challenging
-// and requires that the averaging window be quite long.
-uint32_t lwmaGetNextPOSRequired(const CBlockIndex* pindexLast, const Consensus::Params& params)
+//    return {maxConsecutivePos, maxConsecutiveNoPos, nProofOfWorkBlockPOSUnits, bnLimit, nProofOfStakeDefault};
+std::tuple<int32_t, int32_t, int32_t, arith_uint256, uint32_t> GetPoSCheckParams(uint32_t nHeight, uint32_t lastTime, const Consensus::Params& params)
 {
-    arith_uint256 nextTarget {0}, sumTarget {0}, bnTmp, bnLimit;
-
-    int64_t t = 0, solvetime = 0;
-    int64_t k = params.nLwmaPOSAjustedWeight;
-    int64_t N = params.nPOSAveragingWindow;
-
-    int32_t nHeight = pindexLast->GetHeight();
-
     int32_t maxConsecutivePos = VERUS_CONSECUTIVE_POS_THRESHOLD;
     int32_t maxConsecutiveNoPos = VERUS_NOPOS_THRESHHOLD;
     int32_t nProofOfWorkBlockPOSUnits = VERUS_BLOCK_POSUNITS;
 
-    bnLimit = UintToArith256(params.posLimit);
+    arith_uint256 bnLimit = UintToArith256(params.posLimit);
     uint32_t nProofOfStakeDefault = bnLimit.GetCompact();
 
     if (CConstVerusSolutionVector::activationHeight.ActiveVersion(nHeight + 1) >= CActivationHeight::ACTIVATE_PBAAS)
@@ -239,7 +230,7 @@ uint32_t lwmaGetNextPOSRequired(const CBlockIndex* pindexLast, const Consensus::
         maxConsecutiveNoPos = VERUS_PBAAS_NOPOS_THRESHHOLD;
 
         // due to constraining maximum consecutive PoS blocks, we use this bias to adjust to 50%
-        if (PBAAS_TESTMODE && pindexLast->nTime < PBAAS_TESTFORK_TIME)
+        if (PBAAS_TESTMODE && lastTime < PBAAS_TESTFORK_TIME)
         {
             nProofOfWorkBlockPOSUnits += (VERUS_BLOCK_POSUNITS / 20);
         }
@@ -262,11 +253,35 @@ uint32_t lwmaGetNextPOSRequired(const CBlockIndex* pindexLast, const Consensus::
         supplyDivisor = ((supplyDivisor >> 16) == 0) ? 1 : supplyDivisor >> 16;
         bnLimit = fiftyPercentPerSatoshi / supplyDivisor;
     }
-    else if (_IsVerusMainnetActive() && pindexLast && pindexLast->GetHeight() >= 1567999)
+    else if (_IsVerusMainnetActive() && nHeight >= 1567999)
     {
         bnLimit = UintToArith256(uint256S("00000000000f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f"));
         nProofOfStakeDefault = bnLimit.GetCompact();
     }
+
+    return {maxConsecutivePos, maxConsecutiveNoPos, nProofOfWorkBlockPOSUnits, bnLimit, nProofOfStakeDefault};
+}
+
+// the goal is to keep POS at a solve time that is a ratio of block time units. the low resolution makes a stable solution more challenging
+// and requires that the averaging window be quite long.
+uint32_t lwmaGetNextPOSRequired(const CBlockIndex* pindexLast, const Consensus::Params& params)
+{
+    int32_t nHeight = pindexLast->GetHeight();
+
+    std::tuple<int32_t, int32_t, int32_t, arith_uint256, uint32_t> posParams =
+    GetPoSCheckParams(nHeight, pindexLast->nTime, params);
+
+    int32_t maxConsecutivePos = std::get<0>(posParams);
+    int32_t maxConsecutiveNoPos = std::get<1>(posParams);
+    int32_t nProofOfWorkBlockPOSUnits = std::get<2>(posParams);
+
+    arith_uint256 bnLimit = std::get<3>(posParams);
+    uint32_t nProofOfStakeDefault = std::get<4>(posParams);
+
+    arith_uint256 nextTarget {0}, sumTarget {0}, bnTmp;
+    int64_t t = 0, solvetime = 0;
+    int64_t k = params.nLwmaPOSAjustedWeight;
+    int64_t N = params.nPOSAveragingWindow;
 
     struct solveSequence {
         int64_t solveTime;

@@ -95,6 +95,20 @@ public:
         return 0;
     }
 
+    bool HasCappedTransactionMap() const
+    {
+        if (nVersion == VERUS_V2)
+        {
+            return CConstVerusSolutionVector::Version(nSolution) >= CActivationHeight::ACTIVATE_PBAAS_HARDEN1;
+        }
+        return 0;
+    }
+
+    int PartialTransactionProofVersion() const
+    {
+        return HasCappedTransactionMap() ? CPartialTransactionProof::VERSION_TXHASH_CAP : CPartialTransactionProof::VERSION_CURRENT;
+    }
+
     int32_t HasPBaaSHeader() const
     {
         if (nVersion == VERUS_V2)
