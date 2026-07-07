@@ -1214,7 +1214,7 @@ UniValue signrawtransaction(const UniValue& params, bool fHelp)
             TxInErrorToJSON(txin, vErrors, "Input not found or already spent");
             continue;
         }
-        const CScript& prevPubKey = CCoinsViewCache::GetSpendFor(coins, txin);
+        const CScript& prevPubKey = CCoinsViewCache::GetSpendFor(coins, txin, chainActive.LastTip()->nTime);
         const CAmount& amount = coins->vout[txin.prevout.n].nValue;
 
         SignatureData sigdata;

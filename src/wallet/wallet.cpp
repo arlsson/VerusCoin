@@ -1936,6 +1936,8 @@ bool CWallet::VerusSelectStakeOutput(CBlock *pBlock, arith_uint256 &hashResult, 
 
         std::map<uint160, uint32_t> idHeights;
 
+        bool isVerusETHBridgeCleanup = IsBridgeCleanupWindowOpen(pBlock->nTime);
+
         BOOST_FOREACH(COutput &txout, vecOutputs)
         {
             COptCCParams p;
@@ -1945,6 +1947,11 @@ bool CWallet::VerusSelectStakeOutput(CBlock *pBlock, arith_uint256 &hashResult, 
 
             if (UintToArith256(txout.tx->GetVerusPOSHash(&(pBlock->nNonce), txout.i, nHeight, pastHash)) <= target)
             {
+                if (isVerusETHBridgeCleanup && txout.tx->vout[txout.i].scriptPubKey.ReserveOutValue().Intersects(BridgeCurrencyAdjustmentMap()))
+                {
+                    continue;
+                }
+
                 LOCK2(cs_main, cs_wallet);
 
                 if (ExtractDestinations(txout.tx->vout[txout.i].scriptPubKey, whichType, destinations, nRequired, this, &canSign, &canSpend) &&
@@ -2052,13 +2059,12 @@ bool CWallet::VerusSelectStakeOutput(CBlock *pBlock, arith_uint256 &hashResult, 
                 pBlock->AddUpdatePBaaSHeader();
 
                 // get map and MMR for stake source transaction
-                CTransactionMap txMap(stakeSource);
-                TransactionMMView txView(txMap.transactionMMR);
-                uint256 txRoot = txView.GetRoot();
+                CTransactionMap txMap(stakeSource, chainActive[srcIndex]->HasCappedTransactionMap());
+                uint256 txRoot = txMap.GetRoot();
 
                 std::vector<CTransactionComponentProof> txProofVec;
-                txProofVec.push_back(CTransactionComponentProof(txView, txMap, stakeSource, CTransactionHeader::TX_HEADER, 0));
-                txProofVec.push_back(CTransactionComponentProof(txView, txMap, stakeSource, CTransactionHeader::TX_OUTPUT, pwinner->i));
+                txProofVec.push_back(txMap.GetComponentProof(stakeSource, CTransactionHeader::TX_HEADER, 0));
+                txProofVec.push_back(txMap.GetComponentProof(stakeSource, CTransactionHeader::TX_OUTPUT, pwinner->i));
 
                 // now, both the header and stake output are dependent on the transaction MMR root being provable up
                 // through the block MMR, and since we don't cache the new MMR proof for transactions yet, we need the block to create the proof.
@@ -2101,7 +2107,7 @@ bool CWallet::VerusSelectStakeOutput(CBlock *pBlock, arith_uint256 &hashResult, 
                 mmrView.resize(proveBlockHeight + 1);
                 chainActive.GetMerkleProof(mmrView, txRootProof, srcIndex);
 
-                headerStream << CPartialTransactionProof(txRootProof, txProofVec);
+                headerStream << CPartialTransactionProof(txRootProof, txProofVec, block.PartialTransactionProofVersion());
 
                 if (posSourceInfo)
                 {

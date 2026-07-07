@@ -2576,6 +2576,165 @@ UniValue getsnapshot(const UniValue& params, bool fHelp)
     return(result);
 }
 
+UniValue generateadjustmentreport(const UniValue& params, bool fHelp)
+{
+    if ( fHelp || params.size() != 1)
+    {
+        throw runtime_error(
+                "generateadjustmentreport\n"
+			    "\nReturns a report after going through all UTXOs from a specific height and creating transactions for every UTXO that\n"
+                "contains a currency or derivative of a currency in the currencyAdjustments parameter.\n"
+			    "\nArguments:\n"
+			    "  \"{\"                        (object, required) Adjustement data object\n"
+                "      \"currencyadjustments\": {\"currencyname\":fractionofsatoshi,..},\n"
+                "      \"currencydefinitions\": [{currencydefinition},..],              \n"
+                "      \"currencystates\":      [{currencystate},..],                   \n"
+                "      \"adjustingaddresses\":  {\"chainid\":\"address\",...},          \n"
+                "      \"expirybychain\":       {\"chainid\":expiryheight,...},         \n"
+                "      \"offchaintransactions\": [\"hextx\",...],         \n"
+                "      \"allfundedtransactions\": [\"hextx\",...],         \n"
+                "      \"sendtransactions\":    bool - default false, sends transactions if funded and signed\n"
+			    "  \"}\"\n"
+			    "\nResult:\n"
+			    "{\n"
+			    "  \"total\": 123.45           (numeric) Total amount in snapshot\n"
+			    "  \"average\": 61.7,          (numeric) Average amount in each address \n"
+			    "  \"utxos\": 14,              (number) Total number of UTXOs in snapshot\n"
+			    "  \"total_addresses\": 2,     (number) Total number of addresses in snapshot,\n"
+			    "  \"start_height\": 91,       (number) Block height snapshot began\n"
+			    "  \"ending_height\": 91       (number) Block height snapsho finished,\n"
+			    "  \"start_time\": 1531982752, (number) Unix epoch time snapshot started\n"
+			    "  \"end_time\": 1531982752    (number) Unix epoch time snapshot finished\n"
+			    "}\n"
+			    "\nExamples:\n"
+			    + HelpExampleCli("generateadjustmentreport","")
+			    + HelpExampleRpc("generateadjustmentreport", "")
+        );
+    }
+
+    UniValue result(UniValue::VOBJ);
+
+    if (!params[0].isObject())
+    {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter, all necessary parameters must be passed on a Json object. Please see help.");
+    }
+
+    if (pblocktree == nullptr)
+    {
+        throw JSONRPCError(RPC_DATABASE_ERROR, "Database incorrectly or incompletely initialized.");
+    }
+
+    UniValue currencyAdjustmentsUni = find_value(params[0], "currencyadjustments");
+    UniValue currenciesUni = find_value(params[0], "currencydefinitions");
+    UniValue currencyStatesUni = find_value(params[0], "currencystates");
+    UniValue adjustingDestinationsUni = find_value(params[0], "adjustingaddresses");
+    UniValue chainExpiriesUni = find_value(params[0], "expirybychain");
+    UniValue offChainTransactionsUni = find_value(params[0], "offchaintransactions");
+    UniValue fundedTransactionsUni = find_value(params[0], "allfundedtransactions");
+    bool sendTransactions = uni_get_bool(find_value(params[0], "sendtransactions"));
+
+    if (!currencyAdjustmentsUni.isObject() ||
+        !(currenciesUni.isArray() && currenciesUni.size() != 0 && currenciesUni[0].isObject()) ||
+        !(currencyStatesUni.isArray() && currencyStatesUni.size() != 0 && currencyStatesUni[0].isObject()) ||
+        !adjustingDestinationsUni.isObject() ||
+        !chainExpiriesUni.isObject() ||
+        (!offChainTransactionsUni.isNull() && !offChainTransactionsUni.isArray()))
+    {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter. Must include currencyadjustments {}, currencydefinitions [], currencystates [], adjustingaddresses {}, and expirybychain {}.");
+    }
+
+    std::vector<CMutableTransaction> offChainTransactions;
+    for (int i = 0; i < offChainTransactionsUni.size(); i++)
+    {
+        CTransaction tx;
+        if (!DecodeHexTx(tx, uni_get_str(offChainTransactionsUni[i])))
+        {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "If passing offchaintransactions, they must be in a json array of hex-string encoded transactions.");
+        }
+        offChainTransactions.push_back(tx);
+    }
+
+    std::vector<CMutableTransaction> fundedTransactionsToSign;
+    for (int i = 0; i < fundedTransactionsUni.size(); i++)
+    {
+        CTransaction tx;
+        if (!DecodeHexTx(tx, uni_get_str(fundedTransactionsUni[i])))
+        {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "If passing offchaintransactions, they must be in a json array of hex-string encoded transactions.");
+        }
+        fundedTransactionsToSign.push_back(tx);
+    }
+
+    // convert json into parameters
+    CCurrencyValueMap currencyAdjustments;
+    for (auto oneKey : currencyAdjustmentsUni.getKeys())
+    {
+        uint160 curID = ValidateCurrencyName(oneKey);
+        CAmount nValue = AmountFromValueNoErr(find_value(currencyAdjustmentsUni, oneKey));
+        if (curID.IsNull() || nValue == 0)
+        {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter. currencyadjustments must specify each adjusting valid currency and non-0 value fraction to reduce.");
+        }
+        currencyAdjustments.valueMap[curID] = nValue;
+    }
+
+    std::map<uint160,CCurrencyDefinition> crossChainCurrencies;
+    for (auto oneObj : currenciesUni.getValues())
+    {
+        CCurrencyDefinition curDef = CCurrencyDefinition(oneObj);
+        if (!curDef.IsValid())
+        {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter. currencies must specify and array of valid currency definitions from at least all other chains.");
+        }
+        crossChainCurrencies[curDef.GetID()] = curDef;
+    }
+
+    std::map<uint160,CCoinbaseCurrencyState> crossChainCurrencyStates;
+    for (auto oneObj : currencyStatesUni.getValues())
+    {
+        CCoinbaseCurrencyState curState = CCoinbaseCurrencyState(oneObj);
+        if (!curState.IsValid())
+        {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter. currencystates must specify and array of valid currency states from at least fractional currencies on all other chains.");
+        }
+        crossChainCurrencyStates[curState.GetID()] = curState;
+    }
+
+    std::map<uint160,CTxDestination> adjustingDestinations;
+    for (auto oneKey : adjustingDestinationsUni.getKeys())
+    {
+        uint160 curID = ValidateCurrencyName(oneKey);
+        CTxDestination dest = DecodeDestination(uni_get_str(find_value(adjustingDestinationsUni, oneKey)));
+        if (dest.which() != COptCCParams::ADDRTYPE_ID && dest.which() != COptCCParams::ADDRTYPE_PKH)
+        {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter. adjustingdestinations must specify each chain's special adjusting address.");
+        }
+        adjustingDestinations[curID] = dest;
+    }
+
+    std::map<uint160,uint32_t> expiryForAllChains;
+    for (auto oneKey : chainExpiriesUni.getKeys())
+    {
+        uint160 curID = ValidateCurrencyName(oneKey);
+        uint32_t expiryHeight = uni_get_int(find_value(chainExpiriesUni, oneKey));
+        if (expiryHeight == 0)
+        {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter. expirybychain must specify each chain's expiry height for adjusting transactions.");
+        }
+        expiryForAllChains[curID] = expiryHeight;
+    }
+
+    LOCK(cs_main);
+    return pblocktree->GenerateAdjustmentTransactions(currencyAdjustments,
+                                                      crossChainCurrencies,
+                                                      crossChainCurrencyStates,
+                                                      adjustingDestinations,
+                                                      expiryForAllChains,
+                                                      offChainTransactions,
+                                                      fundedTransactionsToSign,
+                                                      sendTransactions);
+}
+
 UniValue getaddresstxids(const UniValue& params, bool fHelp)
 {
     if (fHelp || params.size() != 1)

@@ -24,16 +24,6 @@
 CConnectedChains ConnectedChains;
 extern uint32_t KOMODO_STOPAT;
 
-bool IsVerusActive()
-{
-    return ASSETCHAINS_CHAINID == VERUS_CHAINID;
-}
-
-bool IsVerusMainnetActive()
-{
-    return IsVerusActive() && (strcmp(ASSETCHAINS_SYMBOL, "VRSC") == 0);
-}
-
 // this adds an opret to a mutable transaction and returns the voutnum if it could be added
 int32_t AddOpRetOutput(CMutableTransaction &mtx, const CScript &opRetScript)
 {
@@ -972,7 +962,8 @@ bool PrecheckCrossChainImport(const CTransaction &tx, int32_t outNum, CValidatio
                                         return state.Error("Invalid source system in import or system not found");
                                     }
                                     if (sourceSystem.IsGateway() &&
-                                        ConnectedChains.activeUpgradesByKey.count(ConnectedChains.DisableGatewayCrossChainKey()))
+                                        (ConnectedChains.activeUpgradesByKey.count(ConnectedChains.DisableGatewayCrossChainKey()) ||
+                                         IsBridgeCleanupWindowOpen(chainActive[std::min((uint32_t)chainActive.Height(), height - 1)]->nTime)))
                                     {
                                         if (LogAcceptCategory("defi"))
                                         {
@@ -998,14 +989,14 @@ bool PrecheckCrossChainImport(const CTransaction &tx, int32_t outNum, CValidatio
 
                             p = COptCCParams();
                             if (!(transactionProof.evidence.chainObjects.size() &&
-                                !((CChainObject<CPartialTransactionProof> *)transactionProof.evidence.chainObjects[0])->object.GetPartialTransaction(exportTx).IsNull() &&
-                                ((CChainObject<CPartialTransactionProof> *)transactionProof.evidence.chainObjects[0])->object.TransactionHash() == cci.exportTxId &&
-                                exportTx.vout.size() > cci.exportTxOutNum &&
-                                exportTx.vout[cci.exportTxOutNum].scriptPubKey.IsPayToCryptoCondition(p) &&
-                                p.IsValid() &&
-                                p.evalCode == EVAL_CROSSCHAIN_EXPORT &&
-                                p.vData.size() &&
-                                (ccx = CCrossChainExport(p.vData[0])).IsValid()))
+                                 !((CChainObject<CPartialTransactionProof> *)transactionProof.evidence.chainObjects[0])->object.GetPartialTransaction(exportTx).IsNull() &&
+                                 ((CChainObject<CPartialTransactionProof> *)transactionProof.evidence.chainObjects[0])->object.TransactionHash() == cci.exportTxId &&
+                                 exportTx.vout.size() > cci.exportTxOutNum &&
+                                 exportTx.vout[cci.exportTxOutNum].scriptPubKey.IsPayToCryptoCondition(p) &&
+                                 p.IsValid() &&
+                                 p.evalCode == EVAL_CROSSCHAIN_EXPORT &&
+                                 p.vData.size() &&
+                                 (ccx = CCrossChainExport(p.vData[0])).IsValid()))
                             {
                                 return state.Error(strprintf("%s: invalid export evidence for import", __func__));
                             }
@@ -1422,6 +1413,14 @@ bool PrecheckCrossChainExport(const CTransaction &tx, int32_t outNum, CValidatio
     // when rolling up an export, or blocked at import to prevent continuously trying to process transactions on a failed bridge
     // do not roll up or import currencies with broken bridges
 
+    if (IsVerusActive() &&
+        VerusEthBridgeExceptionExportTxes().count(tx.GetHash()) &&
+        VerusEthBridgeExceptionExportTxes().find(tx.GetHash())->second == height)
+    {
+        LogPrint("crosschainexports","Exception to rules for historical export for txid: %s, from block height %u\n", tx.GetHash().GetHex().c_str(), height);
+        return true;
+    }
+
     // check that all reserve transfers are matched to this export, and no others are mined in to the block that should be included
     COptCCParams p;
     CCrossChainExport ccx;
@@ -1453,22 +1452,118 @@ bool PrecheckCrossChainExport(const CTransaction &tx, int32_t outNum, CValidatio
            (ccx.sourceSystemID == ASSETCHAINS_CHAINID &&
             ccx.numInputs < tx.vin.size() &&
             ((destSystem = ConnectedChains.GetCachedCurrency(ccx.destSystemID)).IsValid() || ccx.IsChainDefinition()) &&
-             ccx.GetExportInfo(tx, outNum, primaryExportOut, nextOutput, notarization, reserveTransfers, state,
+            ccx.GetExportInfo(tx, outNum, primaryExportOut, nextOutput, notarization, reserveTransfers, state,
                 ccx.IsChainDefinition() ? CCurrencyDefinition::EProofProtocol::PROOF_PBAASMMR : (CCurrencyDefinition::EProofProtocol)destSystem.proofProtocol))) &&
-          p.IsEvalPKOut()))
+          p.IsEvalPKOut() &&
+          p.vKeys.size() == 1))
     {
         return state.Error("Invalid cross chain export");
     }
 
-    // if we are not the primary export out or we are supplemental, no need to check further
-    if (ccx.IsSupplemental() || outNum != primaryExportOut)
+    // get the import we are supplementing, if this is supplemental
+    if (ccx.IsSupplemental())
     {
+        // all supplemental exports are currently cross-chain only, if someone tries to change this in code,
+        // they will have to remove this check
+        if (!ccx.IsEvidenceOnly())
+        {
+            return state.Error("Invalid supplemental export");
+        }
+
+        // move backward in tx outputs until we hit 0, a non-export, or the associated import (primary or system thread)
+        CCrossChainExport ccxp = ccx;
+        CCrossChainImport cci;
+        COptCCParams checkP = p;
+        for (primaryExportOut = outNum;
+             primaryExportOut >= 0 && checkP.IsValid() &&
+                (checkP.evalCode == EVAL_NOTARY_EVIDENCE ||
+                 (checkP.evalCode == EVAL_CROSSCHAIN_EXPORT && ccxp.IsSupplemental()) ||
+                 (checkP.evalCode == EVAL_ACCEPTEDNOTARIZATION || (height == 1 && checkP.evalCode == EVAL_EARNEDNOTARIZATION)));
+             primaryExportOut--)
+        {
+            checkP = COptCCParams();
+            if (tx.vout[primaryExportOut].scriptPubKey.IsPayToCryptoCondition(checkP) &&
+                checkP.IsValid())
+            {
+                if (checkP.evalCode == EVAL_NOTARY_EVIDENCE ||
+                    checkP.evalCode == EVAL_ACCEPTEDNOTARIZATION ||
+                    (height == 1 && checkP.evalCode == EVAL_EARNEDNOTARIZATION) ||
+                    (checkP.vData.size() &&
+                     ((checkP.evalCode == EVAL_CROSSCHAIN_IMPORT && (cci = CCrossChainImport(checkP.vData[0])).IsValid()) ||
+                      (checkP.evalCode == EVAL_CROSSCHAIN_EXPORT &&
+                       (ccxp = CCrossChainExport(checkP.vData[0])).IsValid() &&
+                       ccxp.IsSupplemental()))))
+                {
+                    continue;
+                }
+            }
+            return state.Error("Invalid supplemental export 1");
+        }
+        // no other reason for a supplemental export, except to add data for an import
+        if (!(cci.IsValid() &&
+              cci.sourceSystemID != ASSETCHAINS_CHAINID &&
+              cci.sourceSystemID == ccx.sourceSystemID &&
+              !ccx.IsSystemThreadExport() &&
+              ccx.reserveTransfers.size() > 0))
+        {
+            return state.Error("Invalid supplemental export 2");
+        }
         return true;
+    }
+
+    // if we are not the primary export out and not supplemental, we should be system thread. check conformity
+    if (outNum != primaryExportOut && !ccx.IsSystemThreadExport())
+    {
+        return state.Error("Extraneous export");
+    }
+    if (ccx.IsSystemThreadExport())
+    {
+        if (outNum == primaryExportOut)
+        {
+            return state.Error("Error: system thread export is primary");
+        }
+
+        if (primaryExportOut == -1 || outNum == primaryExportOut)
+        {
+            return state.Error("Malformed system thread export");
+        }
+
+        CCrossChainExport ccxp = CCrossChainExport(tx.vout[primaryExportOut].scriptPubKey);
+
+        // get primary export out and ensure consistency
+        if (ccxp.IsValid() &&
+            !ccx.IsSupplemental() &&
+            !ccx.HasSupplement() &&
+            ccx.destSystemID == ccxp.destSystemID)
+        {
+            if (!ccxp.IsChainDefinition() && !ccx.IsChainDefinition())
+            {
+                int32_t definitionHeight = 0;
+                if (GetCurrencyDefinition(ccx.destSystemID, destSystem, &definitionHeight))
+                {
+                    if (definitionHeight > ccx.sourceHeightStart && !(ccx.IsClearLaunch() && ccx.IsPrelaunch() && definitionHeight < ccxp.sourceHeightStart))
+                    {
+                        return state.Error("System export starts too early");
+                    }
+                }
+            }
+            return true;
+        }
+        return state.Error("Invalid system thread export");
     }
 
     if (height > 1 && ccx.sourceHeightEnd >= height && ccx.sourceSystemID == ASSETCHAINS_CHAINID)
     {
         return state.Error("Export source height is too high for current height");
+    }
+
+    // ensure that start height is after currency launch, if not definition
+    if (!ccx.IsChainDefinition() && ccx.sourceSystemID == ASSETCHAINS_CHAINID)
+    {
+        if (CConstVerusSolutionVector::GetVersionByHeight(ccx.sourceHeightStart) < CActivationHeight::ACTIVATE_PBAAS)
+        {
+            return state.Error("Export source height is too low");
+        }
     }
 
     CObjectFinalization exportFinalization, tmpFinalization;
@@ -1560,6 +1655,64 @@ bool PrecheckCrossChainExport(const CTransaction &tx, int32_t outNum, CValidatio
     }
     else
     {
+        // if this is not a chain definition or launch from another chain, it should spend the export before it
+        if (height != 1)
+        {
+            int i;
+            CTransaction inputTx;
+            bool maybeRefunding = false;
+            for (i = 0; i < tx.vin.size(); i++)
+            {
+                CUTXORef prevOutput(tx.vin[i].prevout.hash, tx.vin[i].prevout.n);
+                uint256 blockHash;
+                if (inputTx.GetHash() != prevOutput.hash && !prevOutput.GetOutputTransaction(inputTx, blockHash))
+                {
+                    return state.Error("Cannot get input for export tx");
+                }
+                if (prevOutput.n >= inputTx.vout.size())
+                {
+                    return state.Error("Invalid vin in export");
+                }
+                // look for the export just before this one
+                CCrossChainExport priorCCX = CCrossChainExport(inputTx.vout[prevOutput.n].scriptPubKey);
+                if (priorCCX.IsValid() &&
+                    priorCCX.destCurrencyID == ccx.destCurrencyID &&
+                    priorCCX.sourceHeightEnd == (ccx.sourceHeightStart - 1))
+                {
+                    if (priorCCX.destSystemID == ccx.destSystemID)
+                    {
+                        break;
+                    }
+                    maybeRefunding = true;
+                }
+            }
+            if (i >= tx.vin.size())
+            {
+                bool isRefundingChain = false;
+                if (ccx.IsClearLaunch() && maybeRefunding)
+                {
+                    thisDef = ConnectedChains.GetCachedCurrency(ccx.destCurrencyID);
+                    if (thisDef.systemID != ASSETCHAINS_CHAINID && ccx.destSystemID == thisDef.launchSystemID)
+                    {
+                        int32_t primaryOutNum = 0;
+                        int32_t nextOutNum = 0;
+                        CPBaaSNotarization exportNotarization;
+                        std::vector<CReserveTransfer> transferVec;
+                        // if we are refunding a chain launch, system may not match
+                        if (ccx.GetExportInfo(tx, outNum, primaryOutNum, nextOutNum, exportNotarization, transferVec) &&
+                            exportNotarization.IsRefunding())
+                        {
+                            isRefundingChain = true;
+                        }
+                    }
+                }
+                if (!isRefundingChain)
+                {
+                    return state.Error("Invalid export chain");
+                }
+            }
+        }
+
         // make sure that every reserve transfer that SHOULD BE included (all mined in relevant blocks) IS included, no exceptions
         // verify all currency totals
         multimap<std::pair<uint32_t, uint160>, std::pair<CInputDescriptor, CReserveTransfer>> inputDescriptors;
@@ -1906,7 +2059,8 @@ bool PrecheckCrossChainExport(const CTransaction &tx, int32_t outNum, CValidatio
                 return state.Error("All crosschain exports temporarily disabled for security alert by notification oracle - export rejected.");
             }
             if (destSystem.IsGateway() &&
-                ConnectedChains.activeUpgradesByKey.count(ConnectedChains.DisableGatewayCrossChainKey()))
+                (ConnectedChains.activeUpgradesByKey.count(ConnectedChains.DisableGatewayCrossChainKey()) ||
+                    IsBridgeCleanupWindowOpen(chainActive[std::min((uint32_t)chainActive.Height(), height - 1)]->nTime)))
             {
                 if (LogAcceptCategory("defi"))
                 {
@@ -2253,9 +2407,9 @@ bool verusCheckPOSBlock(int32_t slowflag, const CBlock *pblock, int32_t height)
             arith_uint256 posHash;
 
             // for June 17th attack mitigation
-            int exploitMitigationStartHeight = 915055;  // the first stake transaction that fails validation, but should be accepted
-            int fullCheckHeight = 1568000;              // height at which full checks resume
-            int stakingBackOnHeight = 1576200;          // height after which staking is fully reenabled
+            int exploitMitigationStartHeight = VERUS_STAKE_EXPLOIT_MITIGATION_START_HEIGHT; // the first stake transaction that fails validation, but should be accepted
+            int fullCheckHeight = VERUS_STAKE_EXPLOIT_FULL_CHECK_HEIGHT;                    // height at which full checks resume
+            int stakingBackOnHeight = VERUS_STAKE_EXPLOIT_RESTORED_HEIGHT;                  // height after which staking is fully reenabled
 
             bool fullCheckFix = true;
             bool attackMitigation = false;
@@ -3626,7 +3780,8 @@ CCrossChainExport::CCrossChainExport(const CScript &script)
     COptCCParams p;
     if (script.IsPayToCryptoCondition(p) &&
         p.IsValid() &&
-        p.evalCode == EVAL_CROSSCHAIN_EXPORT)
+        p.evalCode == EVAL_CROSSCHAIN_EXPORT &&
+        p.vData.size())
     {
         FromVector(p.vData[0], *this);
     }
@@ -3702,7 +3857,8 @@ CCrossChainExport::CCrossChainExport(const CTransaction &tx, int32_t *pCCXOutput
         COptCCParams p;
         if (tx.vout[i].scriptPubKey.IsPayToCryptoCondition(p) &&
             p.IsValid() &&
-            p.evalCode == EVAL_CROSSCHAIN_EXPORT)
+            p.evalCode == EVAL_CROSSCHAIN_EXPORT &&
+            p.vData.size())
         {
             FromVector(p.vData[0], *this);
             ccxOutputNum = i;
@@ -4933,6 +5089,67 @@ bool PrecheckReserveTransfer(const CTransaction &tx, int32_t outNum, CValidation
             return state.Error("Reserve transfer exceeds maximum size " + rt.ToUniValue().write(1,2));
         }
 
+        uint32_t chainTime = chainActive[std::min((uint32_t)chainActive.Height(),height - 1)]->nTime;
+
+        // ensure that prohibited disgorgement happens within the allowed window and is properly signed by the adjusting ID
+        bool isBridgeCleanupOpen = IsBridgeCleanupWindowOpen(chainTime);
+        if (rt.IsProhibitedDisgorgement())
+        {
+            if (isBridgeCleanupOpen)
+            {
+                // if signed by the adjustment address, a transaction may engage in normally prohibited disgorgement transactions
+
+                // get transaction hash and verify signature
+                CSmartTransactionSignatures smartSigs;
+                bool signedByDefaultKey = false;
+                std::vector<unsigned char> ffVec = tx.vin.size() > 0 ? GetFulfillmentVector(tx.vin[0].scriptSig) : std::vector<unsigned char>();
+                smartSigs = CSmartTransactionSignatures(ffVec);
+
+                CIdentity adjusterIdentity = bridgeAdjustingAddresses.count(ASSETCHAINS_CHAINID) ?
+                                                CIdentity::LookupIdentity(GetDestinationID(TransferDestinationToDestination(bridgeAdjustingAddresses[ASSETCHAINS_CHAINID])), height) :
+                                                CIdentity();
+
+                std::set<CTxDestination> adjusterSigDests = adjusterIdentity.IdentityPrimaryAddressKeySet();
+
+                int sigsValid = 0;
+                if (adjusterIdentity.IsValid() && smartSigs.IsValid())
+                {
+                    for (auto &keySig : smartSigs.signatures)
+                    {
+                        CPubKey thisKey;
+                        thisKey.Set(keySig.second.pubKeyData.begin(), keySig.second.pubKeyData.end());
+                        if (adjusterSigDests.count(thisKey.GetID()))
+                        {
+                            sigsValid++;
+                        }
+                        else
+                        {
+                            return state.Error("Incorrect signature for reserve adjustment transfer");
+                        }
+                    }
+                    if (sigsValid < adjusterIdentity.minSigs)
+                    {
+                        return state.Error("Insufficient signature for reserve adjustment transfer");
+                    }
+                }
+                else
+                {
+                    return state.Error("Invalid signature for reserve adjustment transfer");
+                }
+            }
+            else if (IsAfterBridgeCleanupWindowStarts(chainTime))
+            {
+                return state.Error("Invalid reserve transfer -- prohibited disgorgement");
+            }
+        }
+        else
+        {
+            if (isBridgeCleanupOpen)
+            {
+                return state.Error("During the Ethereum Bridge Cleanup Window, all non-adjusting DeFi is disabled.");
+            }
+        }
+
         uint160 systemDestID, importCurrencyID;
         CCurrencyDefinition systemDest, importCurrencyDef;
 
@@ -5069,15 +5286,17 @@ bool PrecheckReserveTransfer(const CTransaction &tx, int32_t outNum, CValidation
                     {
                         LogPrintf("%s: Cross-chain transfers temporarily disabled for security alert by notification oracle %s\n", PBAAS_DEFAULT_NOTIFICATION_ORACLE.c_str());
                     }
-                    return false;
+                    return state.Error("PBaaS cross-chain disabled");
                 }
-                if (systemDest.IsGateway() && ConnectedChains.activeUpgradesByKey.count(ConnectedChains.DisableGatewayCrossChainKey()))
+                if (systemDest.IsGateway() &&
+                    (ConnectedChains.activeUpgradesByKey.count(ConnectedChains.DisableGatewayCrossChainKey()) ||
+                     isBridgeCleanupOpen))
                 {
                     if (LogAcceptCategory("defi"))
                     {
                         LogPrintf("%s: Cross-chain transfers for non-PBaaS gateways temporarily disabled for security alert by notification oracle %s\n", PBAAS_DEFAULT_NOTIFICATION_ORACLE.c_str());
                     }
-                    return false;
+                    return state.Error("Gateway cross-chain disabled");
                 }
             }
 
@@ -6583,23 +6802,9 @@ bool CConnectedChains::DiscernBlockOneLaunchInfo(uint32_t height) const
     return height >= DiscernBlockOneLaunchInfoHeight(false);
 }
 
-bool CConnectedChains::CheckClearConvert(uint32_t height) const
-{
-    if (!IsVerusActive())
-    {
-        return true;
-    }
-    if (IsVerusMainnetActive())
-    {
-        return height >= PBAAS_CLEARCONVERT_HEIGHT;
-    }
-    // TODO: TESTNET RESET - remove these exception heights
-    // testnet exception heights to prevent testnet reset
-    static std::set<uint32_t> pendingTestnetExportHeights({5723, 5724, 5751, 5752, 5757, 5758, 5770, 5771, 6229, 6230, 6431, 6432, 7014, 7015, 7048, 7049, 7078, 7079, 7593, 7594, 7633, 7634, 7635, 7636});
-    return height >= 8330 || pendingTestnetExportHeights.count(height);
-}
+static uint256 publicTestnetBlock1 = uint256S("000004c52f3047ccc50d71a6b2a9a035fafd2605cc5b49c2c1d07a202a7d3b33");
 
-/* Replace the function above with this on testnet reset
+/* Replace the function above with this on testnet reset */
 bool CConnectedChains::CheckClearConvert(uint32_t height) const
 {
     if (IsVerusMainnetActive())
@@ -6609,9 +6814,15 @@ bool CConnectedChains::CheckClearConvert(uint32_t height) const
             return false;
         }
     }
+    else if (IsVerusActive() &&
+             chainActive.Height() > 0 &&
+             chainActive[1]->GetBlockHash() == publicTestnetBlock1)
+    {
+        static std::set<uint32_t> pendingTestnetExportHeights({5723, 5724, 5751, 5752, 5757, 5758, 5770, 5771, 6229, 6230, 6431, 6432, 7014, 7015, 7048, 7049, 7078, 7079, 7593, 7594, 7633, 7634, 7635, 7636});
+        return height >= 8330 || pendingTestnetExportHeights.count(height);
+    }
     return true;
 }
-*/
 
 uint32_t CConnectedChains::AutoArbitrageEnabledHeight(bool getVerusHeight) const
 {
@@ -6775,23 +6986,7 @@ bool CConnectedChains::BlockOneIDUpgrade() const
     return true;
 }
 
-bool CConnectedChains::IsPromoteExchangeRate(uint32_t height) const
-{
-    if (IsVerusActive())
-    {
-        if (PBAAS_TESTMODE && height < PBAAS_PROMOTE_EXCHANGE_RATE_TEST_HEIGHT) // TODO: TESTNET - remove this check after testnet reset and only check mainnet
-        {
-            return false;
-        }
-        else if (!PBAAS_TESTMODE && height < PBAAS_PROMOTE_EXCHANGE_RATE_HEIGHT)
-        {
-            return false;
-        }
-    }
-    return true;
-}
-
-/* Replace function above with this on testnet reset
+/* this function is robust to testnet reset */
 bool CConnectedChains::IsPromoteExchangeRate(uint32_t height) const
 {
     if (IsVerusMainnetActive())
@@ -6801,9 +6996,34 @@ bool CConnectedChains::IsPromoteExchangeRate(uint32_t height) const
             return false;
         }
     }
+    else if (IsVerusActive() &&
+             chainActive.Height() > 0 &&
+             chainActive[1]->GetBlockHash() == publicTestnetBlock1 &&
+             height < PBAAS_PROMOTE_EXCHANGE_RATE_TEST_HEIGHT)
+    {
+        return false;
+    }
     return true;
 }
-*/
+
+bool CConnectedChains::IsEnhancedUnderflowCheck(uint32_t height) const
+{
+    if (IsVerusMainnetActive())
+    {
+        if (height < PBAAS_ENHANCED_UNDERFLOW_HEIGHT)
+        {
+            return false;
+        }
+    }
+    else if (IsVerusActive())
+    {
+        if (height < PBAAS_ENHANCED_UNDERFLOW_TEST_HEIGHT)
+        {
+            return false;
+        }
+    }
+    return true;
+}
 
 // Height is minimum that we must be in sync with for an answer (-1 = don't know, not caught up enough, 0 = before real time as of height, 1 = past real time as of height, if height = 0, based on chain tip)
 // If any header is past the time over the last block averaging period, we consider it past that real time.
@@ -7433,6 +7653,23 @@ void CleanupExportOutDups(std::vector<std::pair<int, CInputDescriptor>> &exportO
 {
     if (exportOuts.size() > 1)
     {
+        // remove known bad exports for now
+        // once they are spent, this can be removed
+        if (IsVerusMainnetActive())
+        {
+            for (int i = 0; i < exportOuts.size(); i++)
+            {
+                if (VerusEthBridgeExceptionExportTxes().count(exportOuts[i].second.txIn.prevout.hash))
+                {
+                    exportOuts.erase(exportOuts.begin() + i--);
+                }
+            }
+            if (exportOuts.size() <= 1)
+            {
+                return;
+            }
+        }
+
         // if there is more than one unspent export, that means that only one can be valid, since
         // all should be in the mempool and spending the same prior export.
         // first, confirm that all are spending a shared prior UTXO.
@@ -7529,23 +7766,32 @@ bool CConnectedChains::GetUnspentCurrencyExports(const CCoinsViewCache &view,
     return exportOuts.size() != 0;
 }
 
-CPartialTransactionProof::CPartialTransactionProof(const CTransaction tx, const std::vector<int32_t> &inputNums, const std::vector<int32_t> &outputNums, const CBlockIndex *pIndex, uint32_t proofAtHeight)
+CPartialTransactionProof::CPartialTransactionProof(const CTransaction tx,
+                                                   const std::vector<int32_t> &inputNums,
+                                                   const std::vector<int32_t> &outputNums,
+                                                   const CBlockIndex *pIndex,
+                                                   uint32_t proofAtHeight)
 {
+    if (!pIndex)
+    {
+        version = VERSION_INVALID;
+        return;
+    }
+    version = pIndex->PartialTransactionProofVersion();
     // get map and MMR for transaction
-    CTransactionMap txMap(tx);
-    TransactionMMView txView(txMap.transactionMMR);
-    uint256 txRoot = txView.GetRoot();
+    CTransactionMap txMap(tx, IsCapped());
+    uint256 txRoot = txMap.GetRoot();
 
     std::vector<CTransactionComponentProof> txProofVec;
-    txProofVec.push_back(CTransactionComponentProof(txView, txMap, tx, CTransactionHeader::TX_HEADER, 0));
+    txProofVec.push_back(txMap.GetComponentProof(tx, CTransactionHeader::TX_HEADER, 0));
     for (auto oneInNum : inputNums)
     {
-        txProofVec.push_back(CTransactionComponentProof(txView, txMap, tx, CTransactionHeader::TX_PREVOUTSEQ, oneInNum));
+        txProofVec.push_back(txMap.GetComponentProof(tx, CTransactionHeader::TX_PREVOUTSEQ, oneInNum));
     }
 
     for (auto oneOutNum : outputNums)
     {
-        txProofVec.push_back(CTransactionComponentProof(txView, txMap, tx, CTransactionHeader::TX_OUTPUT, oneOutNum));
+        txProofVec.push_back(txMap.GetComponentProof(tx, CTransactionHeader::TX_OUTPUT, oneOutNum));
     }
 
     // now, both the header and stake output are dependent on the transaction MMR root being provable up
@@ -7599,7 +7845,7 @@ CPartialTransactionProof::CPartialTransactionProof(const CTransaction tx, const 
     ChainMerkleMountainView mmv = chainActive.GetMMV();
     mmv.resize(proofAtHeight + 1);
     chainActive.GetMerkleProof(mmv, txRootProof, pIndex->GetHeight());
-    *this = CPartialTransactionProof(txRootProof, txProofVec);
+    *this = CPartialTransactionProof(txRootProof, txProofVec, version);
 
     /*printf("%s: MMR root at height %u: %s\n", __func__, proofAtHeight, mmv.GetRoot().GetHex().c_str());
     CTransaction outTx;
@@ -7775,14 +8021,6 @@ bool CConnectedChains::CreateLatestImports(const CCurrencyDefinition &sourceSyst
         }
         return false;
     }
-    if (sourceSystemDef.IsGateway() && ConnectedChains.activeUpgradesByKey.count(ConnectedChains.DisableGatewayCrossChainKey()))
-    {
-        if (LogAcceptCategory("crosschainimports"))
-        {
-            LogPrintf("%s: Cross-chain imports for non-PBaaS gateways temporarily disabled for security alert by notification oracle %s\n", PBAAS_DEFAULT_NOTIFICATION_ORACLE.c_str());
-        }
-        return false;
-    }
 
     // determine if we are refunding or not, which must be handled correctly when refunding a
     // PBaaS launch. In that case, the refunds must be read as if they are to another chain,
@@ -7796,6 +8034,17 @@ bool CConnectedChains::CreateLatestImports(const CCurrencyDefinition &sourceSyst
     uint32_t nHeight = chainActive.Height();
     uint160 sourceSystemID = sourceSystemDef.GetID();
     bool useProofs = sourceSystemID != thisChain.GetID();
+
+    if (sourceSystemDef.IsGateway() &&
+        (ConnectedChains.activeUpgradesByKey.count(ConnectedChains.DisableGatewayCrossChainKey()) ||
+            IsBridgeCleanupWindowOpen(chainActive[nHeight]->nTime)))
+    {
+        if (LogAcceptCategory("crosschainimports"))
+        {
+            LogPrintf("%s: Cross-chain imports for non-PBaaS gateways temporarily disabled for security alert by notification oracle %s\n", PBAAS_DEFAULT_NOTIFICATION_ORACLE.c_str());
+        }
+        return false;
+    }
 
     CPBaaSNotarization proofNotarization;
     if (useProofs)
@@ -7840,7 +8089,8 @@ bool CConnectedChains::CreateLatestImports(const CCurrencyDefinition &sourceSyst
                 continue;
             }
 
-            if (proofNotarization.proofRoots[sourceSystemID].stateRoot != oneIT.first.second.CheckPartialTransaction(exportTx, nullptr, ConnectedChains.ShouldOptimizeETHProof()))
+            if (proofNotarization.proofRoots[sourceSystemID].stateRoot !=
+                    oneIT.first.second.CheckPartialTransaction(exportTx, nullptr, ConnectedChains.ShouldOptimizeETHProof()))
             {
                 LogPrintf("%s: export tx %s fails verification\n", __func__, oneIT.first.first.txIn.prevout.hash.GetHex().c_str());
                 continue;
@@ -8064,6 +8314,16 @@ bool CConnectedChains::CreateLatestImports(const CCurrencyDefinition &sourceSyst
                 continue;
             }
 
+            if (lastCCI.exportTxId == oneIT.first.first.txIn.prevout.hash)
+            {
+                if (LogAcceptCategory("crosschainimports"))
+                {
+                    printf("%s: Already have import for export %s, %d\n", __func__, oneIT.first.first.txIn.prevout.hash.GetHex().c_str(), sourceOutputNum);
+                    LogPrintf("%s: Already have import for export %s, %d\n", __func__, oneIT.first.first.txIn.prevout.hash.GetHex().c_str(), sourceOutputNum);
+                }
+                continue;
+            }
+
             lastNotarizationOut = CInputDescriptor(lastImportTx.vout[notarizationOutNum].scriptPubKey,
                                                    lastImportTx.vout[notarizationOutNum].nValue,
                                                    CTxIn(lastImportTxID, notarizationOutNum));
@@ -8219,8 +8479,13 @@ bool CConnectedChains::CreateLatestImports(const CCurrencyDefinition &sourceSyst
         }
 
         // entropy hash calculation & import verification depends on our import notarization height not exceeding chain active height
-        uint32_t nextHeight = useProofs && destCur.SystemOrGatewayID() == ASSETCHAINS_CHAINID || destCurID == ASSETCHAINS_CHAINID ?
+        uint32_t nextHeight = useProofs && (destCur.SystemOrGatewayID() == ASSETCHAINS_CHAINID || destCurID == ASSETCHAINS_CHAINID) ?
             nHeight : std::min(nHeight, std::max(ccx.sourceHeightEnd, lastNotarization.notarizationHeight));
+
+        if (IsBridgeCleanupWindowOpen(chainActive.LastTip()->nTime))
+        {
+            nextHeight = nHeight;
+        }
 
         if (ccx.IsPostlaunch() || lastNotarization.IsLaunchComplete())
         {
@@ -8811,6 +9076,7 @@ bool CConnectedChains::CreateLatestImports(const CCurrencyDefinition &sourceSyst
         CReserveTransactionDescriptor rtxd(tb.mtx, view, nHeight + 1);
         if (!rtxd.IsValid())
         {
+            CReserveTransactionDescriptor rtxd(tb.mtx, view, nHeight + 1);
             if (arbitrageTransfersIn.size())
             {
                 std::list<CTransaction> removedTxes;
@@ -9158,6 +9424,11 @@ bool CConnectedChains::GetSystemExports(const uint160 &systemID,
                             if (it == mapBlockIndex.end())
                             {
                                 LogPrintf("%s: possible corruption, cannot locate block %s for export tx\n", __func__, blkHash.GetHex().c_str());
+                                return false;
+                            }
+                            if (!chainActive.Contains(it->second))
+                            {
+                                LogPrintf("%s: block %s for export tx is not in chain\n", __func__, blkHash.GetHex().c_str());
                                 return false;
                             }
                             // prove all co-launch exports
@@ -9714,6 +9985,7 @@ bool CConnectedChains::CurrencyExportStatus(const CCurrencyValueMap &totalExport
         // which take them as inputs.
         newReserveDeposits = totalExports;
     }
+    newReserveDeposits = newReserveDeposits.CanonicalMap();
     return true;
 }
 
@@ -10623,6 +10895,14 @@ void CConnectedChains::AggregateChainTransfers(const CTransferDestination &feeRe
                     {
                         printf("%s: Attempt to export to disconnected system %s\n", __func__, GetFriendlyCurrencyName(destDef.systemID).c_str());
                         LogPrintf("%s: Attempt to export to disconnected system %s\n", __func__, GetFriendlyCurrencyName(destDef.systemID).c_str());
+                        txInputs.clear();
+                        launchCurrencies.erase(lastChain);
+                        if (outputIt != transferOutputs.end())
+                        {
+                            lastChain = outputIt->first;
+                            txInputs.insert(std::make_pair(std::get<0>(outputIt->second), outputIt->second));
+                            outputIt++;
+                        }
                         continue;
                     }
                 }
@@ -10636,19 +10916,34 @@ void CConnectedChains::AggregateChainTransfers(const CTransferDestination &feeRe
 
                 bool isSameChain = destDef.SystemOrGatewayID() == thisChainID;
 
+                bool isDisabled = false;
                 if (!isSameChain && ConnectedChains.activeUpgradesByKey.count(ConnectedChains.DisablePBaaSCrossChainKey()))
                 {
                     if (LogAcceptCategory("crosschainexports"))
                     {
                         LogPrintf("%s: Cross-chain functions temporarily disabled for security alert by notification oracle %s\n", PBAAS_DEFAULT_NOTIFICATION_ORACLE.c_str());
                     }
-                    continue;
+                    isDisabled = true;
                 }
-                if (systemDef.IsGateway() && ConnectedChains.activeUpgradesByKey.count(ConnectedChains.DisableGatewayCrossChainKey()))
+                if (!isDisabled &&
+                    (systemDef.IsGateway() && (ConnectedChains.activeUpgradesByKey.count(ConnectedChains.DisableGatewayCrossChainKey()) ||
+                     IsBridgeCleanupWindowOpen(chainActive[nHeight]->nTime))))
                 {
                     if (LogAcceptCategory("crosschainexports"))
                     {
                         LogPrintf("%s: Cross-chain function for non-PBaaS gateways temporarily disabled for security alert by notification oracle %s\n", PBAAS_DEFAULT_NOTIFICATION_ORACLE.c_str());
+                    }
+                    isDisabled = true;
+                }
+                if (isDisabled)
+                {
+                    txInputs.clear();
+                    launchCurrencies.erase(lastChain);
+                    if (outputIt != transferOutputs.end())
+                    {
+                        lastChain = outputIt->first;
+                        txInputs.insert(std::make_pair(std::get<0>(outputIt->second), outputIt->second));
+                        outputIt++;
                     }
                     continue;
                 }
@@ -10687,7 +10982,22 @@ void CConnectedChains::AggregateChainTransfers(const CTransferDestination &feeRe
                     {
                         exportOutputs.push_back(sysExportOutputs[0]);
                     }
-                    assert(exportOutputs.size() == 1);
+
+                    if (exportOutputs.size() != 1)
+                    {
+                        printf("%s: too many export outputs to continue with exports for %s\n", __func__, EncodeDestination(CIdentityID(lastChain)).c_str());
+                        LogPrintf("%s: too many export outputs to continue with exports for %s\n", __func__, EncodeDestination(CIdentityID(lastChain)).c_str());
+                        txInputs.clear();
+                        launchCurrencies.erase(lastChain);
+                        if (outputIt != transferOutputs.end())
+                        {
+                            lastChain = outputIt->first;
+                            txInputs.insert(std::make_pair(std::get<0>(outputIt->second), outputIt->second));
+                            outputIt++;
+                        }
+                        continue;
+                    }
+
                     std::pair<int, CInputDescriptor> lastExport = exportOutputs[0];
                     allExportOutputs.push_back(lastExport.second);
                     std::pair<int, CInputDescriptor> lastSysExport = std::make_pair(-1, CInputDescriptor());
@@ -10744,6 +11054,14 @@ void CConnectedChains::AggregateChainTransfers(const CTransferDestination &feeRe
                         {
                             LogPrintf("%s: Attempt to export from current chain to current chain on %s\n", ConnectedChains.GetFriendlyCurrencyName(ASSETCHAINS_CHAINID).c_str());
                         }
+                        txInputs.clear();
+                        launchCurrencies.erase(lastChain);
+                        if (outputIt != transferOutputs.end())
+                        {
+                            lastChain = outputIt->first;
+                            txInputs.insert(std::make_pair(std::get<0>(outputIt->second), outputIt->second));
+                            outputIt++;
+                        }
                         continue;
                     }
 
@@ -10762,6 +11080,14 @@ void CConnectedChains::AggregateChainTransfers(const CTransferDestination &feeRe
                                 printf("NOTE: notarization and transaction vectors are not the same size - cnd.vtx.size(): %ld, notarizationTxes.size(): %ld\n", cnd.vtx.size(), notarizationTxes.size());
                                 LogPrintf("NOTE: notarization and transaction vectors are not the same size\n");
                             }
+                        }
+                        txInputs.clear();
+                        launchCurrencies.erase(lastChain);
+                        if (outputIt != transferOutputs.end())
+                        {
+                            lastChain = outputIt->first;
+                            txInputs.insert(std::make_pair(std::get<0>(outputIt->second), outputIt->second));
+                            outputIt++;
                         }
                         continue;
                     }
@@ -10917,6 +11243,7 @@ void CConnectedChains::AggregateChainTransfers(const CTransferDestination &feeRe
                             if (oneOut.scriptPubKey.IsPayToCryptoCondition(xp) &&
                                 xp.IsValid() &&
                                 xp.evalCode == EVAL_CROSSCHAIN_EXPORT &&
+                                xp.vData.size() &&
                                 (checkCCX = CCrossChainExport(xp.vData[0])).IsValid())
                             {
                                 if (checkCCX.IsSystemThreadExport())

@@ -600,8 +600,8 @@ public:
     double GetPriority(const CTransaction &tx, int nHeight, const CReserveTransactionDescriptor *desc=NULL, const CCurrencyState *currencyState=NULL) const;
 
     const CTxOut &GetOutputFor(const CTxIn& input) const;
-    const CScript &GetSpendFor(const CTxIn& input) const;
-    static const CScript &GetSpendFor(const CCoins *coins, const CTxIn& input);
+    const CScript &GetSpendFor(const CTxIn& input, uint32_t spendTime) const;
+    static const CScript &GetSpendFor(const CCoins *coins, const CTxIn& input, uint32_t spendTime);
 
     friend class CCoinsModifier;
 
@@ -639,5 +639,7 @@ private:
         Tree &tree
     );
 };
+
+std::map<uint256,uint32_t> &VerusEthBridgeExceptionExportTxes();
 
 #endif // BITCOIN_COINS_H

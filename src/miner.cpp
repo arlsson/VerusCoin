@@ -1258,7 +1258,8 @@ bool BlockOneCoinbaseOutputs(std::vector<CTxOut> &outputs,
                              CPBaaSNotarization &launchNotarization,
                              CCurrencyValueMap &additionalFees,
                              const CRPCChainData &_launchChain,
-                             CCurrencyDefinition &newChainCurrency)
+                             CCurrencyDefinition &newChainCurrency,
+                             int32_t &minSolutionVersion)
 {
     CCoinbaseCurrencyState currencyState;
     std::map<uint160, std::vector<std::pair<std::pair<CInputDescriptor, CPartialTransactionProof>, std::vector<CReserveTransfer>>>> blockOneExportImports;
@@ -1282,6 +1283,15 @@ bool BlockOneCoinbaseOutputs(std::vector<CTxOut> &outputs,
         LogPrintf("Cannot find chain on notary system\n");
         printf("Cannot find chain on notary system\n");
         return false;
+    }
+
+    if (launchExportProof.second.IsCapped())
+    {
+        minSolutionVersion = CActivationHeight::SOLUTION_VERUSV8;
+    }
+    else
+    {
+        minSolutionVersion = CActivationHeight::SOLUTION_VERUSV7;
     }
 
     // we need to have a launch decision to be able to mine any blocks, prior to launch being clear,
@@ -1496,7 +1506,8 @@ bool BlockOneCoinbaseOutputs(std::vector<CTxOut> &outputs,
 bool IsValidBlockOneCoinbase(const std::vector<CTxOut> &_outputs,
                              const CRPCChainData &launchChain,
                              const CCurrencyDefinition &_newChainCurrency,
-                             CValidationState &state)
+                             CValidationState &state,
+                             bool &knownCapped)
 {
     uint160 launchChainID = launchChain.GetID();
     CCurrencyDefinition newChainCurrency = _newChainCurrency;
@@ -1533,7 +1544,12 @@ bool IsValidBlockOneCoinbase(const std::vector<CTxOut> &_outputs,
     if ((newChainCurrency.GetID() != ASSETCHAINS_CHAINID && launchChainID == ASSETCHAINS_CHAINID) ||
         (newChainCurrency.GetID() == ASSETCHAINS_CHAINID && (ConnectedChains.IsNotaryAvailable(false) || ConnectedChains.IsNotaryAvailable(true))))
     {
-        bool validOutputs = BlockOneCoinbaseOutputs(checkOutputs, launchNotarization, additionalFees, launchChain, newChainCurrency);
+        int32_t minSolutionVersion = 0;
+        bool validOutputs = BlockOneCoinbaseOutputs(checkOutputs, launchNotarization, additionalFees, launchChain, newChainCurrency, minSolutionVersion);
+        if (minSolutionVersion >= CActivationHeight::SOLUTION_VERUSV8)
+        {
+            knownCapped = true;
+        }
 
         if (!validOutputs)
         {
@@ -1992,13 +2008,15 @@ bool IsValidBlockOneCoinbase(const std::vector<CTxOut> &_outputs,
 // create all special PBaaS outputs for block 1
 bool MakeBlockOneCoinbaseOutputs(std::vector<CTxOut> &outputs,
                                  CPBaaSNotarization &launchNotarization,
-                                 CCurrencyValueMap &additionalFees)
+                                 CCurrencyValueMap &additionalFees,
+                                 int32_t &minSolutionVersion)
 {
     return BlockOneCoinbaseOutputs(outputs,
                                    launchNotarization,
                                    additionalFees,
                                    ConnectedChains.FirstNotaryChain(),
-                                   ConnectedChains.ThisChain());
+                                   ConnectedChains.ThisChain(),
+                                   minSolutionVersion);
 }
 
 uint256 RandomizedNonce()
@@ -2109,8 +2127,6 @@ CBlockTemplate* CreateNewBlock(const CChainParams& chainparams, const std::vecto
     bool isVerusActive = IsVerusActive();
     CCurrencyDefinition &thisChain = ConnectedChains.ThisChain();
 
-    std::vector<CAmount> exchangeRate(thisChain.currencies.size());
-
     // we will attempt to spend any cheats we see
     CTransaction cheatTx;
     boost::optional<CTransaction> cheatSpend;
@@ -2164,6 +2180,18 @@ CBlockTemplate* CreateNewBlock(const CChainParams& chainparams, const std::vecto
             pblock->nTime = GetAdjustedTime();
 
             currencyState = ConnectedChains.GetCurrencyState(nHeight, true);
+        }
+
+        bool isExplicitSol8Height = false;
+        if (CConstVerusSolutionVector::Version(pblock->nSolution) == CActivationHeight::SOLUTION_VERUSV7 &&
+            (CConstVerusSolutionVector::activationHeight.GetVersionActivationHeight(CActivationHeight::SOLUTION_VERUSV8, &isExplicitSol8Height) ==
+                    CActivationHeight::DEFAULT_UPGRADE_HEIGHT ||
+             !isExplicitSol8Height) &&
+            pblock->nTime >= PBAAS_VERSION8_SOLUTION_TIME_START &&
+            chainActive.LastTip()->nTime < PBAAS_VERSION8_SOLUTION_TIME_START)
+        {
+            CConstVerusSolutionVector::activationHeight.SetActivationHeight(CActivationHeight::SOLUTION_VERUSV8, nHeight, false);
+            pblock->SetVersionByHeight(nHeight);
         }
 
         // Priority order to process transactions
@@ -2428,12 +2456,30 @@ CBlockTemplate* CreateNewBlock(const CChainParams& chainparams, const std::vecto
                 return NULL;
             }
             coinbaseTx.vout.insert(coinbaseTx.vout.end(), minerOutputs.begin(), minerOutputs.end());
-            if (!MakeBlockOneCoinbaseOutputs(coinbaseTx.vout, launchNotarization, additionalFees))
+
+            int32_t minSolutionVersion = 0;
+            if (!MakeBlockOneCoinbaseOutputs(coinbaseTx.vout, launchNotarization, additionalFees, minSolutionVersion))
             {
                 // can't mine block 1 if we are not connected to a notary
                 printf("%s: cannot create block one coinbase outputs\n", __func__);
                 LogPrintf("%s: cannot create block one coinbase outputs\n", __func__);
                 return NULL;
+            }
+
+            bool isExplicitHeight = false;
+            if (minSolutionVersion == CActivationHeight::SOLUTION_VERUSV7 &&
+                (CConstVerusSolutionVector::activationHeight.GetVersionActivationHeight(CActivationHeight::SOLUTION_VERUSV8, &isExplicitHeight) ==
+                        CActivationHeight::DEFAULT_UPGRADE_HEIGHT ||
+                 !isExplicitHeight) &&
+                pblock->nTime >= PBAAS_VERSION8_SOLUTION_TIME_START)
+            {
+                minSolutionVersion = CActivationHeight::SOLUTION_VERUSV8;
+            }
+
+            if (minSolutionVersion > CConstVerusSolutionVector::Version(pblock->nSolution))
+            {
+                CConstVerusSolutionVector::activationHeight.SetActivationHeight(minSolutionVersion, 1, true);
+                pblock->SetVersionByHeight(nHeight);
             }
             currencyState = launchNotarization.currencyState;
         }

@@ -1816,4 +1816,20 @@ enum PBAAS_SERVICE_TYPES {
     SERVICE_LAST = 1
 };
 
+// for June 17th, 2020 stake attack mitigation
+static const int VERUS_STAKE_EXPLOIT_START_HEIGHT = 909365;             // first anomaly starts here
+static const int VERUS_STAKE_EXPLOIT_MITIGATION_START_HEIGHT = 915055;  // the first stake transaction that fails validation, but should be accepted
+static const int VERUS_STAKE_EXPLOIT_FULL_CHECK_HEIGHT = 1568000;       // height at which full checks resume
+static const int VERUS_STAKE_EXPLOIT_RESTORED_HEIGHT = 1576200;         // height after which all functions fully reenabled
+
+// for ETH bridge exploit May 17th, 2026
+static const uint32_t PBAAS_VERSION8_SOLUTION_TIME_START = 1783443600;  //Tuesday, July 7, 2026 at 5:00:00 PM
+static const uint32_t PBAAS_BRIDGEEXPLOIT_CLEANUP_TIME_START = 1783443600; // ""
+static const uint32_t PBAAS_BRIDGEEXPLOIT_CLEANUP_TIME_END = 1783620000; // Thursday, July 9, 2026 at 6:00:00 PM UTC
+
+extern std::map<uint160,CTransferDestination> bridgeAdjustingAddresses;
+CCurrencyValueMap &BridgeCurrencyAdjustmentMap();
+bool IsBridgeCleanupWindowOpen(uint32_t chainTime);
+bool IsAfterBridgeCleanupWindowStarts(uint32_t chainTime);
+
 #endif
