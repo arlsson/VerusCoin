@@ -9318,6 +9318,10 @@ bool CConnectedChains::GetSystemExports(const uint160 &systemID,
     {
         for (auto &idx : addressIndex)
         {
+            if (VerusEthBridgeExceptionExportTxes().count(idx.first.txhash))
+            {
+                continue;
+            }
             uint256 blkHash;
             CTransaction exportTx;
             if (!idx.first.spending && myGetTransaction(idx.first.txhash, exportTx, blkHash))
@@ -9643,6 +9647,10 @@ bool CConnectedChains::GetCurrencyExports(const uint160 &currencyID,
     {
         for (auto &idx : addressIndex)
         {
+            if (VerusEthBridgeExceptionExportTxes().count(idx.first.txhash))
+            {
+                continue;
+            }
             uint256 blkHash;
             CTransaction exportTx;
             if (!idx.first.spending && myGetTransaction(idx.first.txhash, exportTx, blkHash))

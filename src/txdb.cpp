@@ -2080,7 +2080,7 @@ UniValue CBlockTreeDB::GenerateAdjustmentTransactions(const CCurrencyValueMap &c
         CAmount totalRestitutionCurrencyCredit = thisChainAddressRestitutionCredit[oneAddress.first].second.valueMap.count(vethID) ?
                                                     thisChainAddressRestitutionCredit[oneAddress.first].second.valueMap[vethID] :
                                                     0;
-        totalRestitutionCurrencyCredit = thisChainAddressRestitutionCredit[oneAddress.first].second.valueMap.count(tbtcID) ?
+        totalRestitutionCurrencyCredit += thisChainAddressRestitutionCredit[oneAddress.first].second.valueMap.count(tbtcID) ?
                                                     CCurrencyState::NativeToReserveRaw(thisChainAddressRestitutionCredit[oneAddress.first].second.valueMap[tbtcID],
                                                                                         tBTCRestitutionConversionRate) :
                                                     0;
