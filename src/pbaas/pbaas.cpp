@@ -9318,7 +9318,7 @@ bool CConnectedChains::GetSystemExports(const uint160 &systemID,
     {
         for (auto &idx : addressIndex)
         {
-            if (VerusEthBridgeExceptionExportTxes().count(idx.first.txhash))
+            if (IsVerusBridgeExceptionTx(idx.first.txhash, idx.first.blockHeight))
             {
                 continue;
             }
@@ -9647,7 +9647,7 @@ bool CConnectedChains::GetCurrencyExports(const uint160 &currencyID,
     {
         for (auto &idx : addressIndex)
         {
-            if (VerusEthBridgeExceptionExportTxes().count(idx.first.txhash))
+            if (IsVerusBridgeExceptionTx(idx.first.txhash, idx.first.blockHeight))
             {
                 continue;
             }

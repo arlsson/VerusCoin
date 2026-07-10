@@ -1251,6 +1251,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
             CConstVerusSolutionVector::activationHeight.SetActivationHeight(CActivationHeight::SOLUTION_VERUSV5_1, 1053660, true);
             CConstVerusSolutionVector::activationHeight.SetActivationHeight(CActivationHeight::SOLUTION_VERUSV6, 1796400, true);
             CConstVerusSolutionVector::activationHeight.SetActivationHeight(CActivationHeight::SOLUTION_VERUSV7, 2549420, true);
+            CConstVerusSolutionVector::activationHeight.SetActivationHeight(CActivationHeight::SOLUTION_VERUSV8, 4141448, true);
         }
         else if (IsVerusActive())
         {
@@ -1759,7 +1760,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
 
     if ( fReindex == 0 )
     {
-        bool checkval,fAddressIndex,fSpentIndex,fTimeStampIndex;
+        bool checkval = false,fAddressIndex,fSpentIndex,fTimeStampIndex;
         pblocktree = new CBlockTreeDB(nBlockTreeDBCache, false, fReindex, dbCompression, dbMaxOpenFiles);
 
         fAddressIndex = true;
@@ -1772,6 +1773,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         }
 
         fSpentIndex = true;
+        checkval = false;
         pblocktree->ReadFlag("spentindex", checkval);
         if ( checkval != fSpentIndex )
         {
@@ -1780,6 +1782,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
             fReindex = true;
         }
 
+        checkval = false;
         pblocktree->ReadFlag("idindex", checkval);
         fIdIndex = GetBoolArg("-idindex", checkval);
         if ( checkval != fIdIndex )

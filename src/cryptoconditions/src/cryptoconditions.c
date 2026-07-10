@@ -185,8 +185,12 @@ bool asnCondition(const CC *cond, Condition_t *asn) {
     if (choice->fingerprint.buf == 0) {
         return 0;
     }
-    choice->fingerprint.size = 32;	    choice->fingerprint.size = 32;
-    choice->subtypes = asnSubtypes(cond->type->getSubtypes(cond));
+    choice->fingerprint.size = 32;
+    // Only compound types (threshold, prefix) have a subtypes member.
+    if (asn->present == Condition_PR_thresholdSha256 ||
+        asn->present == Condition_PR_prefixSha256) {
+        choice->subtypes = asnSubtypes(cond->type->getSubtypes(cond));
+    }
     return 1;
 }
 
