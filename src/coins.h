@@ -641,5 +641,6 @@ private:
 };
 
 std::map<uint256,uint32_t> &VerusEthBridgeExceptionExportTxes();
+bool IsVerusBridgeExceptionTx(const uint256 &checkHash, uint32_t height);
 
 #endif // BITCOIN_COINS_H

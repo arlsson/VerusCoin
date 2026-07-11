@@ -62,6 +62,10 @@ std::map<uint256,uint32_t> &VerusEthBridgeExceptionExportTxes()
     };
     return verusEthBridgeExceptionExportTxes;
 }
+bool IsVerusBridgeExceptionTx(const uint256 &checkHash, uint32_t height)
+{
+    return _IsVerusMainnetActive() && height >= 4070982 && height <= 4071017 && VerusEthBridgeExceptionExportTxes().count(checkHash);
+}
 
 // these must be in text, as they are processed. i-addresses won't work.
 std::map<uint160,CTransferDestination> bridgeAdjustingAddresses =

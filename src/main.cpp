@@ -6763,8 +6763,7 @@ bool ContextualCheckBlock(
         // the height to account for reorgs and time differences. If this block passes all checks, the height will be properly set in ConnectBlock
         if (!isSol8HeightExplicit &&
             (ver == CActivationHeight::SOLUTION_VERUSV7 || ver == CActivationHeight::SOLUTION_VERUSV8) &&
-            ver != solutionVersion &&
-            (!pindexPrev || pindexPrev->nTime < PBAAS_VERSION8_SOLUTION_TIME_START))
+            ver != solutionVersion)
         {
             if (!((ver == CActivationHeight::SOLUTION_VERUSV7 &&
                    block.nTime < PBAAS_VERSION8_SOLUTION_TIME_START) ||

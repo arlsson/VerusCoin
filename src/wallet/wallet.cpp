@@ -6120,7 +6120,7 @@ bool CWallet::SelectReserveUTXOs(const CCurrencyValueMap& targetValues,
     // if our lower total + larger total are not enough, no way we have enough
     if ((lowerTotal + largerTotal) < nTotalTarget)
     {
-        // printf("AVAILABLE < nTotalTarget:\nlowerTotal:\n%s\nlargerTotal:\n%s\nnewLargerTotal:\n%s\nTotalTarget:\n%s\n", lowerTotal.ToUniValue().write().c_str(), largerTotal.ToUniValue().write().c_str(), newLargerTotal.ToUniValue().write().c_str(), nTotalTarget.ToUniValue().write().c_str());
+        printf("AVAILABLE < nTotalTarget:\nlowerTotal:\n%s\nlargerTotal:\n%s\nnewLargerTotal:\n%s\nTotalTarget:\n%s\n", lowerTotal.ToUniValue().write().c_str(), largerTotal.ToUniValue().write().c_str(), newLargerTotal.ToUniValue().write().c_str(), nTotalTarget.ToUniValue().write().c_str());
         return state.Error("Insufficient funds in UTXOs provided");
     }
 

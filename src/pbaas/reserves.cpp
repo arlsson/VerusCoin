@@ -1160,10 +1160,6 @@ CCrossChainImport CCrossChainImport::GetPriorImport(const CTransaction &tx,
                 (cci = CCrossChainImport(p.vData[0])).IsValid() &&
                 cci.importCurrencyID == importCurrencyID)
             {
-                if (ppriorTx)
-                {
-                    *ppriorTx = priorTx;
-                }
                 if (ppriorOutNum)
                 {
                     *ppriorOutNum = oneIn.prevout.n;
@@ -1171,6 +1167,10 @@ CCrossChainImport CCrossChainImport::GetPriorImport(const CTransaction &tx,
                 if (ppriorTxBlockHash)
                 {
                     *ppriorTxBlockHash = priorTxBlockHash;
+                }
+                if (ppriorTx)
+                {
+                    *ppriorTx = priorTx;
                 }
                 break;
             }
