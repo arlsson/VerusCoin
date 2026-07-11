@@ -2188,7 +2188,8 @@ CBlockTemplate* CreateNewBlock(const CChainParams& chainparams, const std::vecto
                     CActivationHeight::DEFAULT_UPGRADE_HEIGHT ||
              !isExplicitSol8Height) &&
             pblock->nTime >= PBAAS_VERSION8_SOLUTION_TIME_START &&
-            chainActive.LastTip()->nTime < PBAAS_VERSION8_SOLUTION_TIME_START)
+            (chainActive.LastTip()->nTime < PBAAS_VERSION8_SOLUTION_TIME_START ||
+             CConstVerusSolutionVector::Version(chainActive.LastTip()->nSolution.nSolution()) < CActivationHeight::SOLUTION_VERUSV7))
         {
             CConstVerusSolutionVector::activationHeight.SetActivationHeight(CActivationHeight::SOLUTION_VERUSV8, nHeight, false);
             pblock->SetVersionByHeight(nHeight);
