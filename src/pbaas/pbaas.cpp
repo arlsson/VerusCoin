@@ -6558,9 +6558,9 @@ std::string VersionString(uint32_t version)
     return ("v" + std::to_string(version >> 24) + "." + std::to_string((version >> 16) & 0xff) + "." + std::to_string((version >> 8) & 0xff) + ((version & 0xff) ? "-" + std::to_string(version & 0xff) : ""));
 }
 
-void CConnectedChains::CheckOracleUpgrades()
+void CConnectedChains::CheckOracleUpgrades(uint32_t atHeight)
 {
-    uint32_t height = chainActive.LastTip() && chainActive.Height() ? chainActive.Height() : 0;
+    uint32_t height = atHeight ? std::min(atHeight, (uint32_t)chainActive.Height()) : (uint32_t)chainActive.Height();
 
     CIdentityID oracleToUse = (!PBAAS_TESTMODE && IsVerusActive() && height < 2620500) ?
                                     CIdentityID(ASSETCHAINS_CHAINID) :
@@ -6583,21 +6583,21 @@ void CConnectedChains::CheckOracleUpgrades()
     }
 
     std::vector<std::tuple<std::vector<unsigned char>, uint256, uint32_t, CUTXORef, CPartialTransactionProof>> upgradeData;
-    if (CConstVerusSolutionVector::GetVersionByHeight(chainActive.Height()) >= CActivationHeight::ACTIVATE_PBAAS)
+    if (CConstVerusSolutionVector::GetVersionByHeight(height) >= CActivationHeight::ACTIVATE_PBAAS)
     {
         upgradeData = CIdentity::GetIdentityContentByKey(oracleToUse,
                                                          UpgradeDataKey(ASSETCHAINS_CHAINID),
                                                          startHeight,
-                                                         0,
+                                                         height,
                                                          false,
                                                          false,
                                                          0,
                                                          false,
-                                                         ConnectedChains.CheckZeroViaOnlyPostLaunch(chainActive.Height()));
+                                                         ConnectedChains.CheckZeroViaOnlyPostLaunch(height));
     }
     uint32_t foundIDAt;
     CTxIn txInDesc;
-    CIdentity oracleID = CIdentity::LookupIdentity(oracleToUse, chainActive.Height(), &foundIDAt, &txInDesc);
+    CIdentity oracleID = CIdentity::LookupIdentity(oracleToUse, height, &foundIDAt, &txInDesc);
 
     if (LogAcceptCategory("oracles"))
     {
