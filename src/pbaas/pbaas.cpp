@@ -2171,7 +2171,8 @@ bool PrecheckCrossChainExport(const CTransaction &tx, int32_t outNum, CValidatio
         // if cross system, we may remove some due to burning
         if (isCrossSystem)
         {
-            if (!ConnectedChains.CurrencyExportStatus(ccx.totalAmounts, ASSETCHAINS_CHAINID, ccx.destSystemID, expectedReserveDeposits, expectedBurn))
+            if (!ConnectedChains.CurrencyExportStatus(ccx.totalAmounts, ASSETCHAINS_CHAINID, ccx.destSystemID, expectedReserveDeposits, expectedBurn) ||
+                expectedBurn.CanonicalMap() != ccx.totalBurned.CanonicalMap())
             {
                 return state.Error("Cross system currency export error");
             }
