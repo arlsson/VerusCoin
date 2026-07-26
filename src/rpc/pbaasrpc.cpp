@@ -9,6 +9,7 @@
 #include "consensus/consensus.h"
 #include "consensus/validation.h"
 #include "core_io.h"
+#include "utilmoneystr.h"
 #ifdef ENABLE_MINING
 #include "crypto/equihash.h"
 #endif
@@ -10275,6 +10276,11 @@ bool CloseOneOffer(const OfferInfo &oneOffer, TransactionBuilder &tb, const CTxD
         bool hasTokens = false;
 
         value -= std::min(DEFAULT_TRANSACTION_FEE, value);
+        if (value <= 0)
+        {
+            LogPrintf("%s: Offer value (%s) too small after fee deduction, skipping\n", __func__, FormatMoney(oneOffer.inputToOfferTx.vout[oneOffer.offerTx.vin[0].prevout.n].nValue).c_str());
+            return false;
+        }
 
         uint256 ovk;
         if (hasZDest)
@@ -10302,6 +10308,11 @@ bool CloseOneOffer(const OfferInfo &oneOffer, TransactionBuilder &tb, const CTxD
             }
             offeredIdentity.UpgradeVersion(height);
             value -= std::min(DEFAULT_TRANSACTION_FEE, value);
+            if (value <= 0)
+            {
+                LogPrintf("%s: Identity offer value (%s) too small after second fee deduction, skipping\n", __func__, FormatMoney(oneOffer.inputToOfferTx.vout[oneOffer.offerTx.vin[0].prevout.n].nValue).c_str());
+                return false;
+            }
             tb.AddTransparentOutput(offeredIdentity.IdentityUpdateOutputScript(height + 1), value);
         }
         else if (p.evalCode == EVAL_IDENTITY_COMMITMENT)
@@ -10468,7 +10479,8 @@ UniValue closeoffers(const UniValue& params, bool fHelp)
 
         if (!relayTx)
         {
-            throw JSONRPCError(RPC_TRANSACTION_REJECTED, "Close offer transaction rejected: " + state.GetRejectReason());
+            LogPrintf("%s: Close offer transaction for %s rejected: %s\n", __func__, oneOffer.first.second.GetHex().c_str(), state.GetRejectReason().c_str());
+            continue;
         }
         else
         {
