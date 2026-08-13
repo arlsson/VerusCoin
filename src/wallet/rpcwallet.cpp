@@ -507,6 +507,65 @@ UniValue sendtoaddress(const UniValue& params, bool fHelp)
     return wtx.GetHash().GetHex();
 }
 
+UniValue getwalletaddresses(const UniValue& params, bool fHelp)
+{
+    if (!EnsureWalletIsAvailable(fHelp))
+        return NullUniValue;
+
+    if (fHelp)
+        throw runtime_error(
+            "getwalletaddresses\n"
+            "\nReturns a list of all R addresses in the wallet.\n"
+            "Reads directly from the keystore -- does not scan transactions.\n"
+            "\nResult:\n"
+            "[\n"
+            "  \"address\",   (string) The Verus address\n"
+            "  ...\n"
+            "]\n"
+            "\nExamples:\n"
+            + HelpExampleCli("getwalletaddresses", "")
+            + HelpExampleRpc("getwalletaddresses", "")
+        );
+
+    LOCK2(cs_main, pwalletMain->cs_wallet);
+
+    std::map<CKeyID, int64_t> mapKeyBirth;
+    std::set<CKeyID> setAddress;
+    pwalletMain->GetKeyBirthTimes(mapKeyBirth);
+    pwalletMain->GetAllReserveKeys(setAddress);
+
+    std::set<CKeyID> idKeyIDs = pwalletMain->GetIdentityKeyIDs();
+
+    UniValue result(UniValue::VARR);
+    std::set<std::string> seenAddresses;
+
+    for (const auto& entry : mapKeyBirth) {
+        std::string addr = EncodeDestination(entry.first);
+        if (!seenAddresses.count(addr)) {
+            seenAddresses.insert(addr);
+            result.push_back(addr);
+        }
+    }
+
+    for (const CKeyID& keyid : setAddress) {
+        std::string addr = EncodeDestination(keyid);
+        if (!seenAddresses.count(addr)) {
+            seenAddresses.insert(addr);
+            result.push_back(addr);
+        }
+    }
+
+    for (const CKeyID& keyid : idKeyIDs) {
+        std::string addr = EncodeDestination(keyid);
+        if (!seenAddresses.count(addr)) {
+            seenAddresses.insert(addr);
+            result.push_back(addr);
+        }
+    }
+
+    return result;
+}
+
 UniValue listaddressgroupings(const UniValue& params, bool fHelp)
 {
     if (!EnsureWalletIsAvailable(fHelp))
@@ -8538,6 +8597,7 @@ static const CRPCCommand commands[] =
     { "wallet",             "getaccountaddress",        &getaccountaddress,        true  },
     { "wallet",             "getaccount",               &getaccount,               true  },
     { "wallet",             "getaddressesbyaccount",    &getaddressesbyaccount,    true  },
+    { "wallet",             "getwalletaddresses",       &getwalletaddresses,       true  },
     { "wallet",             "getbalance",               &getbalance,               false },
     { "wallet",             "getcurrencybalance",       &getcurrencybalance,       false },
     { "wallet",             "getnewaddress",            &getnewaddress,            true  },
