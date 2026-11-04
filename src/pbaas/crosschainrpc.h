@@ -29,6 +29,14 @@
 #include "pbaas/shuffle_compat.h"
 #endif
 
+#ifndef SATOSHIDEN
+#define SATOSHIDEN ((uint64_t)100000000L)
+#endif
+
+#ifndef KOMODO_ASSETCHAIN_MAXLEN
+#define KOMODO_ASSETCHAIN_MAXLEN 65
+#endif
+
 template<typename RAIterator, typename RNG>
 void pbaas_shuffle(RAIterator first, RAIterator last, RNG&& rng)
 {
@@ -39,7 +47,7 @@ void pbaas_shuffle(RAIterator first, RAIterator last, RNG&& rng)
 #endif
 }
 
-static const int DEFAULT_RPC_TIMEOUT=900;
+static const int DEFAULT_RPC_TIMEOUT=15;
 static const uint32_t PBAAS_VERSION = 1;
 static const uint32_t PBAAS_VERSION_INVALID = 0;
 
@@ -264,10 +272,13 @@ public:
 
     template <typename Stream, typename Operation>
     inline void SerializationOp(Stream& s, Operation ser_action) {
-        READWRITE(type);
-        READWRITE(destination);
         if (ser_action.ForRead())
         {
+            uint8_t _transferType;
+            type = DEST_INVALID;
+            READWRITE(_transferType);
+            READWRITE(destination);
+            type = _transferType;
             switch (TypeNoFlags())
             {
                 case DEST_ETH:
@@ -293,6 +304,11 @@ public:
                     break;
                 }
             }
+        }
+        else
+        {
+            READWRITE(type);
+            READWRITE(destination);
         }
         if (type & FLAG_DEST_GATEWAY)
         {
@@ -358,7 +374,8 @@ public:
         {
             for (int i = 0; i < auxDests.size(); i++)
             {
-                if (!GetAuxDest(i).IsValid())
+                CTransferDestination oneAux = GetAuxDest(i);
+                if (!oneAux.IsValid() || ::AsVector(oneAux) != auxDests[i])
                 {
                     valid = false;
                     break;
@@ -530,6 +547,7 @@ public:
         MAX_ETH_CURRENCY_DEFINITION_EXPORTS_PER_BLOCK = 1,
         MAX_ETH_IDENTITY_DEFINITION_EXPORTS_PER_BLOCK = 0,
         MAX_ETH_TRANSFER_EXPORTS_PER_BLOCK = 50,
+        MAX_ETH_TRANSFER_EXPORTS_PER_BLOCK_POST_BRIDGE_CLEANUP = 20,
         MAX_ETH_TRANSFER_EXPORTS_SIZE_PER_BLOCK = 50000,
         MIN_DEFAULT_TX_EXPIRY = 20,                 // minimum blocks for transaction expiry
         MAX_DEFAULT_TX_EXPIRY = 60,                 // maximum blocks for transaction expiry
@@ -582,6 +600,7 @@ public:
     enum EProofProtocol
     {
         PROOF_INVALID = 0,                  // proof protocol must have valid type
+        PROOF_FIRSTPROTOCOL = 1,
         PROOF_PBAASMMR = 1,                 // Verus MMR proof, no notaries required
         PROOF_CHAINID = 2,                  // if signed by the chain ID, that is considered proof
         PROOF_ETHNOTARIZATION = 3,          // proven by Ethereum notarization
@@ -717,7 +736,12 @@ public:
 
     CCurrencyDefinition(const std::vector<unsigned char> &asVector)
     {
-        ::FromVector(asVector, *this);
+        bool success = false;
+        ::FromVector(asVector, *this, &success);
+        if (!success)
+        {
+            nVersion = PBAAS_VERSION_INVALID;
+        }
     }
 
     CCurrencyDefinition(const CScript &scriptPubKey);
@@ -981,10 +1005,7 @@ public:
         }
     }
 
-    int32_t MaxTransferExportCount() const
-    {
-        return proofProtocol == PROOF_ETHNOTARIZATION ? MAX_ETH_TRANSFER_EXPORTS_PER_BLOCK : MAX_TRANSFER_EXPORTS_PER_BLOCK;
-    }
+    int32_t MaxTransferExportCount(uint32_t chainTime) const;
 
     int32_t MaxTransferExportSize() const
     {
@@ -1182,7 +1203,15 @@ public:
                 rewards.size() == rewardsDecay.size() &&
                 rewards.size() == halving.size() &&
                 rewards.size() == eraEnd.size() &&
-                std::max({rewards.size(), rewardsDecay.size(), halving.size(), eraEnd.size()}) <= ASSETCHAINS_MAX_ERAS;
+                std::max({rewards.size(), rewardsDecay.size(), halving.size(), eraEnd.size()}) <= ASSETCHAINS_MAX_ERAS &&
+                preLaunchDiscount >= 0 &&
+                preLaunchDiscount < SATOSHIDEN &&
+                preLaunchCarveOut >= 0 &&
+                preLaunchCarveOut < SATOSHIDEN &&
+                proofProtocol >= PROOF_PBAASMMR &&
+                proofProtocol <= PROOF_LASTPROTOCOL &&
+                notarizationProtocol >= NOTARIZATION_AUTO &&
+                notarizationProtocol <= NOTARIZATION_NOTARY_LAST;
     }
 
     uint32_t ChainOptions() const
@@ -1422,9 +1451,15 @@ public:
         }
     }
 
-    CIdentitySignature(const std::vector<unsigned char> &asVector)
+    CIdentitySignature(const std::vector<unsigned char> &asVector) :
+        version(VERSION_INVALID), hashType(CCurrencyDefinition::EHashTypes::HASH_INVALID), blockHeight(0)
     {
-        ::FromVector(asVector, *this);
+        bool success = false;
+        ::FromVector(asVector, *this, &success);
+        if (!success)
+        {
+            version = VERSION_INVALID;
+        }
     }
 
     template <typename Stream, typename Operation>
@@ -1525,7 +1560,7 @@ public:
                                           const uint256 &msgHash,
                                           std::vector<std::vector<unsigned char>> *pDupSigs=nullptr) const;
 
-    uint32_t Version()
+    uint32_t Version() const
     {
         return version;
     }
@@ -1575,7 +1610,7 @@ public:
         return retObj;
     }
 
-    uint32_t IsValid()
+    uint32_t IsValid() const
     {
         return version <= VERSION_LAST && version >= VERSION_FIRST &&
             (hashType == CCurrencyDefinition::EHashTypes::HASH_BLAKE2BMMR || (version >= VERSION_ETHBRIDGE && IsValidHashType((CCurrencyDefinition::EHashTypes)hashType)));
@@ -1707,7 +1742,8 @@ public:
             }
             default:
             {
-                assert(false);
+                nativeHashType = CCurrencyDefinition::EHashTypes::HASH_INVALID;
+                state.hw_blake2b = nullptr;
             }
         }
     }
@@ -1868,10 +1904,16 @@ static const uint32_t PBAAS_BRIDGEEXPLOIT_CLEANUP_TIME_START = 1783443600; // ""
 static const uint32_t PBAAS_BRIDGEEXPLOIT_CLEANUP_TIME_END = 1783620000; // Thursday, July 9, 2026 at 6:00:00 PM UTC
 static const uint32_t PBAAS_TESTNET_IDENTITY_START_CHECKSER = 1786147200; // Saturday, August 8, 2026 at 12:00:00 AM UTC
 
+static const uint32_t PBAAS_SECONDBRIDGEEXPLOIT_CLEANUP_TIME_START = 1793491200; // Sunday, November 1, 2026 at 12:00:00 AM UTC
+static const uint32_t PBAAS_SECONDBRIDGEEXPLOIT_CLEANUP_TIME_END = 1793491200; // Sunday, November 1, 2026 at 12:00:00 AM UTC
+
+static const uint32_t PBAAS_TESTING_DOUBLE_CAP_TIME_START = 1792800000; // Saturday, October 24, 2026 at 12:00:00 AM UTC
+
 extern std::map<uint160,CTransferDestination> bridgeAdjustingAddresses;
 CCurrencyValueMap &BridgeCurrencyAdjustmentMap();
 bool IsBridgeCleanupWindowOpen(uint32_t chainTime);
 bool IsAfterBridgeCleanupWindowStarts(uint32_t chainTime);
 bool IsAfterSecondBridgeCleanupWindowStarts(uint32_t chainTime);
+bool IsAfterDoubleCapTestTime(uint32_t chainTime);
 
 #endif

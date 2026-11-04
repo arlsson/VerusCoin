@@ -1,9 +1,9 @@
 /********************************************************************
  * (C) 2019 Michael Toutonghi
- * 
+ *
  * Distributed under the MIT software license, see the accompanying
  * file COPYING or http://www.opensource.org/licenses/mit-license.php.
- * 
+ *
  * This is an implementation of a Merkle Mountain Range that can work on a variety of node types and is optimized for the following uses:
  * 1. Easy append of new elements without invalidate or change of any prior proofs
  * 2. Fast, simple rewind/truncate to previous size
@@ -12,7 +12,7 @@
  * 4. Support for additional information to be captured and propagated along with the
  *    MMR through nodes that may have a more complex combination step, for example, to track aggregate work and stake (power) across all
  *    headers in a chain.
- * 
+ *
  * 2/23/2020 - added support for alternate hash algorithms
  */
 
@@ -104,7 +104,7 @@ public:
     CMMRPowerNode(uint256 Hash, uint256 Power) : hash(Hash), power(Power) {}
 
     template <typename SERIALIZABLE>
-    static const uint256 &HashObj(const SERIALIZABLE &obj)
+    static const uint256 HashObj(const SERIALIZABLE &obj)
     {
         HASHALGOWRITER hw(SER_GETHASH, 0);
         hw << obj;
@@ -323,7 +323,7 @@ public:
     CMerkleBranchBase(BRANCH_TYPE type) : branchType(type) {}
 
     ADD_SERIALIZE_METHODS;
-    
+
     template <typename Stream, typename Operation>
     inline void SerializationOp(Stream& s, Operation ser_action) {
         READWRITE(branchType);
@@ -367,7 +367,7 @@ public:
     }
 
     ADD_SERIALIZE_METHODS;
-    
+
     template <typename Stream, typename Operation>
     inline void SerializationOp(Stream& s, Operation ser_action) {
         READWRITE(*(CMerkleBranchBase *)this);
@@ -391,9 +391,9 @@ public:
         for (auto it(branch.begin()); it != branch.end(); it++)
         {
             HASHALGOWRITER hw(SER_GETHASH, 0);
-            if (index & 1) 
+            if (index & 1)
             {
-                if (*it == hash) 
+                if (*it == hash)
                 {
                     // non canonical. hash may be equal to node but never on the right.
                     //printf("returning null 2\n");
@@ -414,6 +414,34 @@ public:
             //printf("safeCheck: %s\n", hash.GetHex().c_str());
         }
         return hash;
+    }
+
+    // cumulative power of the chain through the proven leaf, from a power-node branch; null for other node types
+    uint256 GetPrefixPower() const
+    {
+        if (NODETYPE::GetExtraHashCount() != 1 || branch.size() < 1 || !(branch.size() & 1))
+        {
+            return uint256();
+        }
+        int64_t index = GetMMRProofIndex(nIndex, nSize, NODETYPE::GetExtraHashCount());
+        if (index == -1)
+        {
+            return uint256();
+        }
+        arith_uint256 prefix = UintToArith256(branch[0]);       // the leaf's own power
+        arith_uint256 childPower = prefix;
+        index >>= 1;                                            // bit for branch[0] is always 0
+        for (size_t i = 1; i + 1 < branch.size(); i += 2)
+        {
+            arith_uint256 parentPower = UintToArith256(branch[i + 1]);
+            if (index & 1)                                      // we are the right child, sibling is earlier
+            {
+                prefix += parentPower - childPower;
+            }
+            childPower = parentPower;
+            index >>= 2;                                        // sibling bit, then the parent power's zero bit
+        }
+        return ArithToUint256(prefix);
     }
 };
 typedef CMMRBranch<CBLAKE2bWriter> CMMRNodeBranch;
@@ -441,7 +469,7 @@ public:
     }
 
     ADD_SERIALIZE_METHODS;
-    
+
     template <typename Stream, typename Operation>
     inline void SerializationOp(Stream& s, Operation ser_action) {
         READWRITE(*(CMerkleBranchBase *)this);
@@ -461,9 +489,9 @@ public:
         for (auto it(branch.begin()); it != branch.end(); ++it)
         {
             HASHALGOWRITER hw(SER_GETHASH, 0);
-            if (index & 1) 
+            if (index & 1)
             {
-                if (*it == hash) 
+                if (*it == hash)
                 {
                     // non canonical. hash may be equal to node but never on the right.
                     return uint256();
@@ -520,9 +548,9 @@ public:
             {
                 std::vector<unsigned char> temp;
                 READWRITE(temp);
-                proof_branch.push_back(temp);            
+                proof_branch.push_back(temp);
             }
-        } 
+        }
         else
         {
             int32_t proofSize = proof_branch.size();
@@ -530,7 +558,7 @@ public:
             for (int i = 0; i < proofSize; i++)
             {
                 std::vector<unsigned char> temp(proof_branch[i].begin(), proof_branch[i].end());
-                READWRITE(temp);     
+                READWRITE(temp);
             }
         }
     }
@@ -546,10 +574,10 @@ public:
     uint64_t nonce;
     uint256 storageHash;
     uint256 storageProofKey;
-    uint256 stateRoot, storageProofValue,codeHash, rootProof; 
+    uint256 stateRoot, storageProofValue,codeHash, rootProof;
     std::vector<uint256> branch;
     CRLPProof proofdata;
-    CRLPProof storageProof; 
+    CRLPProof storageProof;
     uint160 address;
     CPATRICIABranch() : CMerkleBranchBase(BRANCH_ETH) {}
     CPATRICIABranch(
@@ -568,10 +596,10 @@ public:
     std::vector<unsigned char> verifyProof(uint256& rootHash,std::vector<unsigned char> key,std::vector<std::vector<unsigned char>>& proof);
     uint256 verifyStorageProof(uint256 hash, bool optimizedProof);
     bool verifyStorageValue(std::vector<unsigned char> testStorageValue);
-    bool CheckStorageKeyHash(uint32_t height) const; 
+    bool CheckStorageKeyHash(uint32_t height) const;
 
     ADD_SERIALIZE_METHODS;
-    
+
     template <typename Stream, typename Operation>
     inline void SerializationOp(Stream& s, Operation ser_action) {
         READWRITE(*(CMerkleBranchBase *)this);
@@ -603,11 +631,12 @@ typedef CPATRICIABranch<> CETHPATRICIABranch;
 class RLP {
 public:
     enum {
-        MAX_RLP_DECODE_DEPTH = 32
+        MAX_RLP_DECODE_DEPTH = 32,
+        MAX_RLP_NODE_SIZE = 16384
     };
     struct rlpDecoded {
         std::vector<std::vector<unsigned char>> data;
-        std::vector<unsigned char> remainder; 
+        std::vector<unsigned char> remainder;
     };
     bool optimized;
     RLP(bool Optimized=true) : optimized(Optimized){};
@@ -620,7 +649,7 @@ public:
 };
 
 class TrieNode {
-public: 
+public:
     enum nodeType{
         BRANCH,
         LEAF,
@@ -638,7 +667,7 @@ public:
         setValue();
     }
 
-private: 
+private:
     nodeType setType();
     void setKey();
     void setValue();
@@ -668,7 +697,7 @@ public:
     }
 
     ADD_SERIALIZE_METHODS;
-    
+
     template <typename Stream, typename Operation>
     inline void SerializationOp(Stream& s, Operation ser_action) {
         READWRITE(*(CMerkleBranchBase *)this);
@@ -688,6 +717,12 @@ public:
 class CMMRProof
 {
 public:
+    enum {
+        UNCAPPED = 0,
+        CAPPED = 1,
+        CAPPED_DOUBLE = 2
+    };
+
     std::vector<CMerkleBranchBase *> proofSequence;
 
     CMMRProof() {}
@@ -735,7 +770,7 @@ public:
     void DeleteProofSequenceEntry(int index);
 
     ADD_SERIALIZE_METHODS;
-    
+
     template <typename Stream, typename Operation>
     inline void SerializationOp(Stream& s, Operation ser_action) {
         if (ser_action.ForRead())
@@ -1115,6 +1150,7 @@ public:
     const CMerkleMountainRange<NODE_TYPE, LAYER_TYPE, LAYER0_TYPE> &mmr; // the underlying mountain range, which provides the hash vectors
     std::vector<uint64_t> sizes;                    // sizes that we will use as proxies for the size of each vector at each height
     std::vector<NODE_TYPE> peaks;                   // peaks
+    std::vector<uint32_t> peakHeights;              // height (layer) of each entry in peaks, same order; used to select a peak by structural position rather than by hash
     std::vector<std::vector<NODE_TYPE>> peakMerkle; // cached layers for the peak merkle if needed
 
     CMerkleMountainView(const CMerkleMountainRange<NODE_TYPE, LAYER_TYPE, LAYER0_TYPE> &mountainRange, uint64_t viewSize=0) : mmr(mountainRange), peaks(), peakMerkle()
@@ -1170,6 +1206,7 @@ public:
         {
             // reset the peak merkle tree, in case this is forced
             peaks.clear();
+            peakHeights.clear();
             peakMerkle.clear();
             for (int ht = 0; ht < sizes.size(); ht++)
             {
@@ -1177,6 +1214,8 @@ public:
                 if (ht == (sizes.size() - 1) || sizes[ht + 1] < ((sizes[ht] + 1) >> 1))
                 {
                     peaks.insert(peaks.begin(), mmr.GetNode(ht, sizes[ht] - 1));
+                    // keep the peak's structural height in lockstep with peaks (same order)
+                    peakHeights.insert(peakHeights.begin(), (uint32_t)ht);
                 }
             }
         }
@@ -1188,6 +1227,7 @@ public:
         {
             sizes.clear();
             peaks.clear();
+            peakHeights.clear();
             peakMerkle.clear();
 
             uint64_t maxSize = mmr.size();
@@ -1356,20 +1396,24 @@ public:
                             printf("\n");
                         } */
 
-                        // we are at a peak, the alternate peak to us, or the next thing we should be hashed with, if there is one, is next on our path
-                        uint256 peakHash = mmr.GetNode(l, p).hash;
-
-                        // linear search to find out which peak we are in the base of the peakMerkle
-                        for (p = 0; p < peaks.size(); p++)
+                        // we are at a peak, the alternate peak to us, or the next thing we should be hashed with, if there is one, is next on our path.
+                        // select the peak by its structural height l (the layer this node peaked at), consistent with
+                        // GetProofBits / GetMMRProofIndex which select by PeakIndexes[p] == l. Selecting by hash equality
+                        // is incorrect: two peaks can share the same hash, and the first hash match may be the wrong peak,
+                        // producing a branch that does not verify against the root.
+                        for (p = 0; p < peakHeights.size(); p++)
                         {
-                            if (peaks[p].hash == peakHash)
+                            if (peakHeights[p] == (uint32_t)l)
                             {
                                 break;
                             }
                         }
 
                         // p is the position in the merkle tree of peaks
-                        assert(p < peaks.size());
+                        if (p >= peaks.size())
+                        {
+                            return false;
+                        }
 
                         // move up to the top, which is always a peak of size 1
                         uint32_t layerNum, layerSize;

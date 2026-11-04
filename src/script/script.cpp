@@ -259,34 +259,66 @@ CTxDestination GetCompatibleAuxDestination(const CTransferDestination &transferD
     return CTxDestination();
 }
 
+bool HasCompatibleDestination(const CTransferDestination &transferDest, CCurrencyDefinition::EProofProtocol addressProtocol)
+{
+    for (int i = -1; i < transferDest.AuxDestCount(); i++)
+    {
+        switch (i == -1 ? transferDest.TypeNoFlags() : transferDest.GetAuxDest(i).TypeNoFlags())
+        {
+            case CTransferDestination::DEST_PKH:
+            case CTransferDestination::DEST_PK:
+            case CTransferDestination::DEST_SH:
+            case CTransferDestination::DEST_ID:
+            case CTransferDestination::DEST_FULLID:
+                if (addressProtocol != CCurrencyDefinition::PROOF_ETHNOTARIZATION) return true;
+                break;
+            case CTransferDestination::DEST_ETH:
+                if (addressProtocol == CCurrencyDefinition::PROOF_ETHNOTARIZATION) return true;
+                break;
+        }
+    }
+    return false;
+}
+
 CTxDestination TransferDestinationToDestination(const CTransferDestination &transferDest, CCurrencyDefinition::EProofProtocol addressProtocol)
 {
     CTxDestination retDest;
     switch (transferDest.TypeNoFlags())
     {
         case CTransferDestination::DEST_PKH:
-            retDest = CKeyID(uint160(transferDest.destination));
+            retDest = transferDest.destination.size() != 20 ? CTxDestination() : CKeyID(uint160(transferDest.destination));
             break;
 
         case CTransferDestination::DEST_PK:
             {
                 CPubKey pk;
-                pk.Set(transferDest.destination.begin(), transferDest.destination.end());
-                retDest = pk;
+                if (transferDest.destination.size() == CPubKey::COMPRESSED_PUBLIC_KEY_SIZE)
+                {
+                    pk.Set(transferDest.destination.begin(), transferDest.destination.end());
+                    retDest = pk;
+                }
             }
             break;
 
         case CTransferDestination::DEST_SH:
-            retDest = CScriptID(uint160(transferDest.destination));
+            retDest = transferDest.destination.size() != 20 ? CTxDestination() : CScriptID(uint160(transferDest.destination));
             break;
 
         case CTransferDestination::DEST_ID:
-            retDest = CIdentityID(uint160(transferDest.destination));
+            retDest = transferDest.destination.size() != 20 ? CTxDestination() : CIdentityID(uint160(transferDest.destination));
             break;
 
         case CTransferDestination::DEST_FULLID:
-            retDest = CIdentityID(CIdentity(transferDest.destination).GetID());
+        {
+            CIdentity _curIdentity;
+            bool success = false;
+            ::FromVector(transferDest.destination, _curIdentity, &success);
+            if (success && _curIdentity.IsValid())
+            {
+                retDest = _curIdentity.GetID();
+            }
             break;
+        }
 
         case CTransferDestination::DEST_REGISTERCURRENCY:
         {
@@ -325,7 +357,7 @@ CTxDestination TransferDestinationToDestination(const CTransferDestination &tran
         }
 
         case CTransferDestination::DEST_QUANTUM:
-            retDest = CQuantumID(uint160(transferDest.destination));
+            retDest = transferDest.destination.size() != 20 ? CTxDestination() : CQuantumID(uint160(transferDest.destination));
             break;
 
         case CTransferDestination::DEST_NESTEDTRANSFER:
@@ -388,7 +420,7 @@ CCurrencyDefinition TransferDestinationToCurrency(const CTransferDestination &de
     {
         case CTransferDestination::DEST_REGISTERCURRENCY:
         {
-            ::FromVector(dest.destination, retCurrency);
+            retCurrency = CCurrencyDefinition(dest.destination);
             break;
         }
     }
@@ -947,20 +979,23 @@ bool CScript::IsCheckLockTimeVerify(int64_t *unlockTime) const
     std::vector<unsigned char> unlockTimeParam = std::vector<unsigned char>();
     CScript::const_iterator it = this->begin();
 
-    if (this->GetOp2(it, op, &unlockTimeParam))
+    if (this->GetOp2(it, op, &unlockTimeParam) &&
+        op >= 1 && op <= 5 &&                                   // direct push, 1..5 bytes (CLTV reads a 5-byte max CScriptNum)
+        unlockTimeParam.size() == (size_t)op &&
+        this->size() > unlockTimeParam.size() + 2 &&
+        (*this)[unlockTimeParam.size() + 1] == OP_CHECKLOCKTIMEVERIFY &&
+        (*this)[unlockTimeParam.size() + 2] == OP_DROP)
     {
-        if (unlockTimeParam.size() >= 0 && unlockTimeParam.size() < 6 &&
-            this->size() > (unlockTimeParam.size() + 1) &&
-            (*this)[unlockTimeParam.size() + 1] == OP_CHECKLOCKTIMEVERIFY)
+        if (unlockTime)
         {
-            int i = unlockTimeParam.size() - 1;
-            for (*unlockTime = 0; i >= 0; i--)
+            *unlockTime = 0;
+            for (int i = unlockTimeParam.size() - 1; i >= 0; i--)
             {
                 *unlockTime <<= 8;
-                *unlockTime |= *((unsigned char *)unlockTimeParam.data() + i);
+                *unlockTime |= unlockTimeParam[i];
             }
-            return true;
         }
+        return true;
     }
     return false;
 }

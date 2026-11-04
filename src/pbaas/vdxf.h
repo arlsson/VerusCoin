@@ -960,7 +960,9 @@ public:
         FLAG_MIME_TYPE_PRESENT = 0x40,
         FLAG_VDXF_KEY_PRESENT = 0x80,
         FLAG_MASK = (FLAG_ENCRYPTED_DATA + FLAG_SALT_PRESENT + FLAG_ENCRYPTION_PUBLIC_KEY_PRESENT + FLAG_INCOMING_VIEWING_KEY_PRESENT +
-                     FLAG_SYMMETRIC_ENCRYPTION_KEY_PRESENT + FLAG_LABEL_PRESENT + FLAG_MIME_TYPE_PRESENT + FLAG_VDXF_KEY_PRESENT)
+                     FLAG_SYMMETRIC_ENCRYPTION_KEY_PRESENT + FLAG_LABEL_PRESENT + FLAG_MIME_TYPE_PRESENT + FLAG_VDXF_KEY_PRESENT),
+
+        MAX_DATA_DESCRIPTOR_DEPTH = 32
     };
 
     uint32_t version;
@@ -1655,7 +1657,7 @@ public:
     // For a plain login (username and password):
     // - An average length email is around 30 characters
     // - A 15 word password from the eff long wordlist is around 120 characters
-    // - The brackets, quotes and commas needed for the string are 7 characters. 
+    // - The brackets, quotes and commas needed for the string are 7 characters.
     // The total of 157 characters fits easily into 512 characters and has space
     // for larger fields that future credential types may have.
     static const size_t MAX_JSON_STRING_LENGTH = 512;
@@ -1744,6 +1746,7 @@ public:
 std::string TrimLeading(const std::string &Name, unsigned char ch);
 std::string TrimTrailing(const std::string &Name, unsigned char ch);
 std::string TrimSpaces(const std::string &Name, bool removeDuals=false, const std::string &invalidChars="\\/:*?\"<>|");
+bool HasOnlyUnicodeScalarValues(const std::string &name);
 
 // this deserializes a vector into either a VDXF data object or a VDXF structured
 // object, which may contain one or more VDXF data objects.

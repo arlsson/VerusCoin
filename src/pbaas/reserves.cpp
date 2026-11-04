@@ -629,8 +629,10 @@ bool CCrossChainImport::GetImportInfo(const CTransaction &importTx,
                       rootIt->second.stateRoot ==
                         ((CChainObject<CPartialTransactionProof> *)transactionProof.evidence.chainObjects[0])->object.CheckPartialTransaction(exportTx, &isPartial, optimizeETHProof) &&
                       ((CChainObject<CPartialTransactionProof> *)transactionProof.evidence.chainObjects[0])->object.TransactionHash() == pBaseImport->exportTxId &&
-                      (((CChainObject<CPartialTransactionProof> *)transactionProof.evidence.chainObjects[0])->object.type == CPartialTransactionProof::TYPE_ETH ||
-                       ((CChainObject<CPartialTransactionProof> *)transactionProof.evidence.chainObjects[0])->object.GetProofHeight() == rootIt->second.rootHeight) &&
+                      ((((CChainObject<CPartialTransactionProof> *)transactionProof.evidence.chainObjects[0])->object.type == CPartialTransactionProof::TYPE_ETH &&
+                        ((CChainObject<CPartialTransactionProof> *)transactionProof.evidence.chainObjects[0])->object.IsChainProof()) ||
+                       (((CChainObject<CPartialTransactionProof> *)transactionProof.evidence.chainObjects[0])->object.type != CPartialTransactionProof::TYPE_ETH &&
+                         ((CChainObject<CPartialTransactionProof> *)transactionProof.evidence.chainObjects[0])->object.GetProofHeight() == rootIt->second.rootHeight)) &&
                       exportTx.vout.size() > pBaseImport->exportTxOutNum &&
                       exportTx.vout[pBaseImport->exportTxOutNum].scriptPubKey.IsPayToCryptoCondition(p) &&
                       p.IsValid() &&
@@ -761,8 +763,8 @@ bool CCrossChainImport::GetImportInfo(const CTransaction &importTx,
             for (int i = 0; i < reserveTransfers.size(); i++)
             {
                 nhw1 << reserveTransfers[i];
-                // if this is not the last, add it into the 2nd hash, which should then match the export
-                if (i + 1 < reserveTransfers.size())
+                // all transfers except arbitrage go into the second hash, which must match the export
+                if ((i + arbitrageTransfers.size()) < reserveTransfers.size())
                 {
                     nhw2 << reserveTransfers[i];
                 }
@@ -2048,14 +2050,17 @@ void DumpConvertData(const std::vector<CAmount> &_inputReserves,
 std::vector<CAmount> CCurrencyState::ConvertAmounts(const std::vector<CAmount> &_inputReserves,
                                                     const std::vector<CAmount> &_inputFractional,
                                                     CCurrencyState &_newState,
-                                                    bool promoteExchangeRate,
                                                     bool layerFixActive,
-                                                    bool enhancedUnderflowCheck,
+                                                    uint32_t height,
                                                     CValidationState &state,
                                                     std::vector<std::vector<CAmount>> const *pCrossConversions,
                                                     std::vector<CAmount> *pViaPrices) const
 {
     static arith_uint256 bigSatoshi(SATOSHIDEN);
+
+    bool promoteExchangeRate = ConnectedChains.IsPromoteExchangeRate(height);
+    bool enhancedUnderflowCheck = ConnectedChains.IsEnhancedUnderflowCheck(height);
+    bool layerReserveFixActive = IsAfterSecondBridgeCleanupWindowStarts(chainActive.ChainTimeAtOrBefore(height));
 
     int32_t numCurrencies = currencies.size();
     std::vector<CAmount> inputReserves = _inputReserves;
@@ -2346,6 +2351,8 @@ std::vector<CAmount> CCurrencyState::ConvertAmounts(const std::vector<CAmount> &
     // in each participating layer, in accordance with each currency's relative percentage
     CAmount addSupply = 0;
     CAmount addNormalizedReserves = 0;
+    std::map<uint160, CAmount> reserveInflow;                    // normalized inflow so far, per currency
+
     for (auto &layer : fractionalLayersOut)
     {
         // each layer has a fractional percentage/weight and a total amount, determined by the total of all weights for that layer
@@ -2354,7 +2361,18 @@ std::vector<CAmount> CCurrencyState::ConvertAmounts(const std::vector<CAmount> &
         // calculate a fractional buy at the total layer ratio for the amount specified
         // and divide the value according to the relative weight of each currency, adding to each entry of fractionalOutMap
         arith_uint256 bigLayerWeight = arith_uint256(layer.first);
-        CAmount totalLayerReserves = ((bigSupply * bigLayerWeight) / bigSatoshi).GetLow64() + addNormalizedReserves;
+        CAmount priorLayerInflow = addNormalizedReserves;
+        if (layerReserveFixActive)
+        {
+            // only earlier flow that landed in currencies still in this layer
+            priorLayerInflow = 0;
+            for (auto &id : layer.second.second)
+            {
+                priorLayerInflow += reserveInflow[id];
+            }
+        }
+
+        CAmount totalLayerReserves = ((bigSupply * bigLayerWeight) / bigSatoshi).GetLow64() + priorLayerInflow;
         addNormalizedReserves += layer.second.first;
         CAmount newSupply = CalculateFractionalOut(layer.second.first, supply + addSupply, totalLayerReserves, layer.first);
         if (newSupply < 0)
@@ -2378,6 +2396,7 @@ std::vector<CAmount> CCurrencyState::ConvertAmounts(const std::vector<CAmount> &
             {
                 idIT->second.first += newSupplyForCurrency;
             }
+            reserveInflow[id] += ((arith_uint256(layer.second.first) * weights[reserveMap[id]]) / bigLayerWeight).GetLow64();
         }
     }
 
@@ -2402,16 +2421,27 @@ std::vector<CAmount> CCurrencyState::ConvertAmounts(const std::vector<CAmount> &
     addSupply = 0;
     addNormalizedReserves = 0;
     CAmount addNormalizedReservesBB = 0, addNormalizedReservesAB = 0;
+    std::map<uint160, CAmount> reserveOutflowBB, reserveOutflowAB;
 
     // calculate sell both before and after buy through this loop
     for (auto &layer : fractionalLayersIn)
     {
         // first calculate sell before-buy, then after-buy
         arith_uint256 bigLayerWeight(layer.first);
+        CAmount priorOutflowBB = addNormalizedReservesBB, priorOutflowAB = addNormalizedReservesAB;   // negative running totals
+        if (layerReserveFixActive)
+        {
+            priorOutflowBB = priorOutflowAB = 0;
+            for (auto &id : layer.second.second)
+            {
+                priorOutflowBB -= reserveOutflowBB[id];
+                priorOutflowAB -= reserveOutflowAB[id];
+            }
+        }
 
         // before-buy starting point
-        CAmount totalLayerReservesBB = ((bigSupply * bigLayerWeight) / bigSatoshi).GetLow64() + addNormalizedReservesBB;
-        CAmount totalLayerReservesAB = ((arith_uint256(supplyAfterBuy) * bigLayerWeight) / bigSatoshi).GetLow64() + addNormalizedReservesAB;
+        CAmount totalLayerReservesBB = ((bigSupply * bigLayerWeight) / bigSatoshi).GetLow64() + priorOutflowBB;
+        CAmount totalLayerReservesAB = ((arith_uint256(supplyAfterBuy) * bigLayerWeight) / bigSatoshi).GetLow64() + priorOutflowAB;
 
         CAmount newNormalizedReserveBB = CalculateReserveOut(layer.second.first, supply + addSupply, layerFixActive ? totalLayerReservesBB : totalLayerReservesBB + addNormalizedReservesBB, layer.first, enhancedUnderflowCheck);
         CAmount newNormalizedReserveAB = CalculateReserveOut(layer.second.first, supplyAfterBuy + addSupply, layerFixActive ? totalLayerReservesAB : totalLayerReservesAB + addNormalizedReservesAB, layer.first, enhancedUnderflowCheck);
@@ -2453,6 +2483,9 @@ std::vector<CAmount> CCurrencyState::ConvertAmounts(const std::vector<CAmount> &
             {
                 newReservesForCurrencyAB = -newReservesForCurrencyAB;
             }
+
+            reserveOutflowBB[id] += newReservesForCurrencyBB;
+            reserveOutflowAB[id] += newReservesForCurrencyAB;
 
             // initialize or add to the new supply for this currency
             if (idIT == fractionalInMap.end())
@@ -2505,12 +2538,23 @@ std::vector<CAmount> CCurrencyState::ConvertAmounts(const std::vector<CAmount> &
 
     addSupply = 0;
     addNormalizedReserves = 0;
+    reserveInflow.clear();
 
     // now calculate buy after sell
     for (auto &layer : fractionalLayersOut)
     {
         arith_uint256 bigLayerWeight = arith_uint256(layer.first);
-        CAmount totalLayerReserves = ((arith_uint256(supplyAfterSell) * bigLayerWeight) / bigSatoshi).GetLow64() + addNormalizedReserves;
+        CAmount priorLayerInflow = addNormalizedReserves;
+        if (layerReserveFixActive)
+        {
+            priorLayerInflow = 0;
+            for (auto &id : layer.second.second)
+            {
+                priorLayerInflow += reserveInflow[id];
+            }
+        }
+
+        CAmount totalLayerReserves = ((arith_uint256(supplyAfterSell) * bigLayerWeight) / bigSatoshi).GetLow64() + priorLayerInflow;
         addNormalizedReserves += layer.second.first;
         CAmount newSupply = CalculateFractionalOut(layer.second.first, supplyAfterSell + addSupply, totalLayerReserves, layer.first);
         arith_uint256 bigNewSupply(newSupply);
@@ -2528,6 +2572,7 @@ std::vector<CAmount> CCurrencyState::ConvertAmounts(const std::vector<CAmount> &
             }
 
             idIT->second.second += ((bigNewSupply * weights[reserveMap[id]]) / bigLayerWeight).GetLow64();
+            reserveInflow[id] += ((arith_uint256(layer.second.first) * weights[reserveMap[id]]) / bigLayerWeight).GetLow64();
         }
     }
 
@@ -2566,7 +2611,17 @@ std::vector<CAmount> CCurrencyState::ConvertAmounts(const std::vector<CAmount> &
             }
 
             fractionalSizes[i] += fractionDelta;
-            rates[i] = ((arith_uint256(inputReserve) * bigSatoshi) / arith_uint256(fractionalSizes[i])).GetLow64();
+
+            // the pool sells fractional at this price, so once active it is rounded up, never down, and the
+            // integer price can no longer clear a net buy below the curve
+            arith_uint256 bigBuyNumerator = arith_uint256(inputReserve) * bigSatoshi;
+            arith_uint256 bigFractionalSize(fractionalSizes[i]);
+            arith_uint256 bigBuyRate = bigBuyNumerator / bigFractionalSize;
+            if (layerReserveFixActive && (bigBuyRate * bigFractionalSize) != bigBuyNumerator)
+            {
+                bigBuyRate += 1;
+            }
+            rates[i] = bigBuyRate.GetLow64();
 
             // add the new reserve and supply to the currency
             newState.supply = newState.AddToSupply(fractionDelta);
@@ -2675,7 +2730,7 @@ std::vector<CAmount> CCurrencyState::ConvertAmounts(const std::vector<CAmount> &
             std::vector<CAmount> _viaPrices;
             std::vector<CAmount> &viaPrices(pViaPrices ? *pViaPrices : _viaPrices);
             CCurrencyState intermediateState = newState;
-            viaPrices = intermediateState.ConvertAmounts(scratchValues, fractionsToConvert, newState, promoteExchangeRate, layerFixActive, enhancedUnderflowCheck, state);
+            viaPrices = intermediateState.ConvertAmounts(scratchValues, fractionsToConvert, newState, layerFixActive, height, state);
         }
     }
 
@@ -3394,11 +3449,6 @@ CReserveTransactionDescriptor::CReserveTransactionDescriptor(const CTransaction 
                         {
                             importGeneratedCurrency.valueMap[ASSETCHAINS_CHAINID] += gatewayDeposits.valueMap[ASSETCHAINS_CHAINID];
                         }
-
-                        for (auto &oneOutCur : cci.totalReserveOutMap.valueMap)
-                        {
-                            AddReserveOutput(oneOutCur.first, oneOutCur.second);
-                        }
                     }
                 }
                 break;
@@ -3448,7 +3498,10 @@ CReserveTransactionDescriptor::CReserveTransactionDescriptor(const CTransaction 
                         flags |= IS_REJECT;
                         return;
                     }
-                    if (ConnectedChains.notarySystems.count(of.currencyID))
+                    if (ConnectedChains.notarySystems.count(of.currencyID) &&
+                        (of.output.hash.IsNull() ||
+                         of.IsConfirmed() || of.IsRejected() ||
+                         of.evidenceOutputs.size() || of.evidenceInputs.size()))
                     {
                         flags |= IS_CHAIN_NOTARIZATION;
                     }
@@ -3592,8 +3645,8 @@ CReserveTransfer CReserveTransfer::GetRefundTransfer(bool clearCrossSystem, bool
         // convert full ID destinations to normal ID outputs, since it's refund, full ID will be on this chain already
         if (rt.destination.type == CTransferDestination::DEST_FULLID)
         {
-            CIdentity(rt.destination.destination);
-            rt.destination = CTransferDestination(CTransferDestination::DEST_ID, rt.destination.destination);
+            CIdentity curIdentity(rt.destination.destination);
+            rt.destination = CTransferDestination(CTransferDestination::DEST_ID, ::AsVector(curIdentity.GetID()));
         }
 
         // if we are clipping a second leg, ensure the destination is valid and recover the fees
@@ -3872,7 +3925,10 @@ bool CReserveTransfer::GetTxOut(const CCurrencyDefinition &sourceSystem,
                 txImportFee = INT64_MAX;
             }
 
-            if ((nextSys.GetID() == ASSETCHAINS_CHAINID && nextLegTransfer.nFees < nextSys.GetTransactionTransferFee()) ||
+            bool nextLegDestUsable = IsCurrencyExport() || IsIdentityExport() ||
+                                        HasCompatibleDestination(nextLegTransfer.destination, (CCurrencyDefinition::EProofProtocol)nextSys.proofProtocol);
+            if (!nextLegDestUsable ||
+                (nextSys.GetID() == ASSETCHAINS_CHAINID && nextLegTransfer.nFees < nextSys.GetTransactionTransferFee()) ||
                 (nextSys.GetID() != ASSETCHAINS_CHAINID && nextLegTransfer.nFees < txImportFee))
             {
                 LogPrintf("%s: Insufficient fee currency for next leg of transfer %s\nFee Required: %s\ntxid: %s\n", __func__, nextLegTransfer.ToUniValue().write(1,2).c_str(),
@@ -4390,6 +4446,8 @@ bool CReserveTransactionDescriptor::AddReserveTransferImportOutputs(const CCurre
     uint32_t chainTime = chainActive.ChainTimeAtOrBefore(height);
     bool isBridgeCleanupWindowOpen = IsBridgeCleanupWindowOpen(chainTime);
     bool isAfterBridgeCleanupWindowStarts = IsAfterBridgeCleanupWindowStarts(chainTime);
+    bool isAfterSecondBridgeCleanupWindowStarts = IsAfterSecondBridgeCleanupWindowStarts(chainTime);
+    std::set<uint160> nftTransferredThisImport;
 
     for (int i = 0; i <= exportObjects.size(); i++)
     {
@@ -4586,7 +4644,9 @@ bool CReserveTransactionDescriptor::AddReserveTransferImportOutputs(const CCurre
                 newCurrencyState.conversionFees = conversionFees.AsCurrencyVector(newCurrencyState.currencies);
                 newCurrencyState.primaryCurrencyFees = transferFees.valueMap.count(importCurrencyID) ? transferFees.valueMap[importCurrencyID] : 0;
                 newCurrencyState.primaryCurrencyConversionFees =
-                    conversionFees.valueMap.count(importCurrencyID) ? transferFees.valueMap[importCurrencyID] : 0;
+                    conversionFees.valueMap.count(importCurrencyID) ?
+                        (isAfterSecondBridgeCleanupWindowStarts ? conversionFees.valueMap[importCurrencyID] : transferFees.valueMap[importCurrencyID]) :
+                        0;
 
                 CCurrencyValueMap exporterReserveFees;
 
@@ -4863,8 +4923,6 @@ bool CReserveTransactionDescriptor::AddReserveTransferImportOutputs(const CCurre
                     exporterDest.which() == COptCCParams::ADDRTYPE_PKH ||
                     exporterDest.which() == COptCCParams::ADDRTYPE_ID)
                 {
-                    bool afterFixBoundary = IsAfterSecondBridgeCleanupWindowStarts(chainTime);
-
                     if (exporterDest2.which() != COptCCParams::ADDRTYPE_INVALID &&
                         exporterReward > systemDest.GetTransactionTransferFee())
                     {
@@ -4876,7 +4934,7 @@ bool CReserveTransactionDescriptor::AddReserveTransferImportOutputs(const CCurre
                         if (halfExportReserves > CCurrencyValueMap())
                         {
                             CTokenOutput ro = CTokenOutput(halfExportReserves);
-                            if (afterFixBoundary)
+                            if (isAfterSecondBridgeCleanupWindowStarts)
                             {
                                 outScript = MakeMofNCCScript(CConditionObj<CTokenOutput>(EVAL_RESERVE_OUTPUT, std::vector<CTxDestination>({exporterDest2}), 1, &ro));
                             }
@@ -4893,7 +4951,7 @@ bool CReserveTransactionDescriptor::AddReserveTransferImportOutputs(const CCurre
                     if (exporterReserves > CCurrencyValueMap())
                     {
                         CTokenOutput ro = CTokenOutput(exporterReserves);
-                        if (afterFixBoundary)
+                        if (isAfterSecondBridgeCleanupWindowStarts)
                         {
                             outScript = MakeMofNCCScript(CConditionObj<CTokenOutput>(EVAL_RESERVE_OUTPUT, std::vector<CTxDestination>({exporterDest}), 1, &ro));
                         }
@@ -4956,6 +5014,11 @@ bool CReserveTransactionDescriptor::AddReserveTransferImportOutputs(const CCurre
                             LogPrint("reservetransfers", "%s: invalid currency for preconversion to %s\n", __func__, importCurrencyDef.name.c_str());
                             return false;
                         }
+                        curTransfer = curTransfer.GetRefundTransfer(clearCrossSystem);
+                    }
+                    else if (isAfterSecondBridgeCleanupWindowStarts && newReserveIn <= 0)
+                    {
+                        LogPrint("defi", "%s: refunding pre-conversion that cannot cover its conversion fee: %s\n", __func__, curTransfer.ToUniValue().write(1,2).c_str());
                         curTransfer = curTransfer.GetRefundTransfer(clearCrossSystem);
                     }
                     else if (maxPreconvert.valueMap.size())
@@ -5055,10 +5118,11 @@ bool CReserveTransactionDescriptor::AddReserveTransferImportOutputs(const CCurre
                     // if it's already in the correct currency, nothing to do, otherwise convert if we can
                     if (curTransfer.feeCurrencyID != nextDestSysID)
                     {
+                        auto nextDestIt = currencyIndexMap.find(nextDestSysID);
+                        auto feeCurIt = currencyIndexMap.find(curTransfer.feeCurrencyID);
                         if (!isFractional ||
-                            (!currencyIndexMap.count(nextDestSysID) &&
-                             !currencyIndexMap.count(curTransfer.feeCurrencyID) &&
-                             curTransfer.feeCurrencyID != importCurrencyID))
+                            nextDestIt == currencyIndexMap.end() ||
+                            (feeCurIt == currencyIndexMap.end() && curTransfer.feeCurrencyID != importCurrencyID))
                         {
                             printf("%s: next leg fee currency %s unavailable for conversion using %s\n", __func__, curNextDest.name.c_str(), importCurrencyDef.name.c_str());
                             LogPrintf("%s: next leg fee currency %s unavailable for conversion using %s\n", __func__, curNextDest.name.c_str(), importCurrencyDef.name.c_str());
@@ -5069,8 +5133,8 @@ bool CReserveTransactionDescriptor::AddReserveTransferImportOutputs(const CCurre
                         // while we won't change the fee currency ID in the curTransfer, all pass through fees are assumed to be in
                         // the next leg's system currency by the time it is ready to produce an output
 
-                        int feeCurIdx = currencyIndexMap[curTransfer.feeCurrencyID];
-                        int nextDestIdx = currencyIndexMap[nextDestSysID];
+                        int feeCurIdx = (feeCurIt == currencyIndexMap.end()) ? -1 : feeCurIt->second;   // -1 only when the fee is the import currency, which never indexes it
+                        int nextDestIdx = nextDestIt->second;
 
                         // either fractional to reserve or reserve-to-reserve fee for the conversion
                         CAmount passThroughFee = CalculateConversionFeeNoMin(curTransfer.destination.fees);
@@ -5086,7 +5150,7 @@ bool CReserveTransactionDescriptor::AddReserveTransferImportOutputs(const CCurre
                         if (curTransfer.feeCurrencyID == importCurrencyID)
                         {
                             finalReserveAmount =
-                                CCurrencyState::NativeToReserveRaw(curTransfer.destination.fees, importCurrencyState.conversionPrice[currencyIndexMap[nextDestSysID]]);
+                                CCurrencyState::NativeToReserveRaw(curTransfer.destination.fees, importCurrencyState.conversionPrice[nextDestIdx]);
                             if (finalReserveAmount == -1)
                             {
                                 printf("%s: Invalid total reserve and fees in amount for %s\n", __func__, curTransfer.ToUniValue().write(1,2).c_str());
@@ -5148,7 +5212,14 @@ bool CReserveTransactionDescriptor::AddReserveTransferImportOutputs(const CCurre
                     {
                         if (curTransfer.feeCurrencyID == systemDestID)
                         {
-                            nativeOut = curTransfer.destination.fees;
+                            if (isAfterSecondBridgeCleanupWindowStarts)
+                            {
+                                nativeOut += curTransfer.destination.fees;
+                            }
+                            else
+                            {
+                                nativeOut = curTransfer.destination.fees;
+                            }
                         }
                         else
                         {
@@ -5594,11 +5665,20 @@ bool CReserveTransactionDescriptor::AddReserveTransferImportOutputs(const CCurre
 
                 const CCurrencyDefinition &fractionalCurrency = toFractional ? currencyDest : sourceCurrency;
                 const CCurrencyDefinition &reserveCurrency = toFractional ? sourceCurrency : currencyDest;
-                int reserveIdx = currencyIndexMap[reserveCurrency.GetID()];
 
-                assert(fractionalCurrency.IsValid() &&
-                        reserveCurrency.IsValid() &&
-                        fractionalCurrency.currencies[reserveIdx] == reserveCurrency.GetID());
+                auto reserveIt = currencyIndexMap.find(reserveCurrency.GetID());
+
+                if (reserveIt == currencyIndexMap.end() ||
+                    !fractionalCurrency.IsValid() ||
+                    !reserveCurrency.IsValid() ||
+                    reserveIt->second >= fractionalCurrency.currencies.size() ||
+                    fractionalCurrency.currencies[reserveIt->second] != reserveCurrency.GetID())
+                {
+                    printf("%s: conversion currency %s is not a reserve of %s\n", __func__, reserveCurrency.name.c_str(), fractionalCurrency.name.c_str());
+                    LogPrintf("%s: conversion currency %s is not a reserve of %s\n", __func__, reserveCurrency.name.c_str(), fractionalCurrency.name.c_str());
+                    return false;
+                }
+                int reserveIdx = reserveIt->second;
 
                 // now, we know that we are converting from the source currency to the
                 // destination currency and also that one of them is a reserve of the other
@@ -5843,6 +5923,16 @@ bool CReserveTransactionDescriptor::AddReserveTransferImportOutputs(const CCurre
                     else
                     {
                         destCurID = curTransfer.FirstCurrency();
+                        if (isAfterSecondBridgeCleanupWindowStarts)
+                        {
+                            CCurrencyDefinition nftCheckDef = ConnectedChains.GetCachedCurrency(destCurID);
+                            if (nftCheckDef.IsValid() && nftCheckDef.IsNFTToken() &&
+                                (curTransfer.FirstValue() != 1 || !nftTransferredThisImport.insert(destCurID).second))
+                            {
+                                LogPrint("defi", "%s: absorbing excess NFT transfer %s\n", __func__, curTransfer.ToUniValue().write(1,2).c_str());
+                                continue;
+                            }
+                        }
                     }
                     AddReserveOutput(destCurID, curTransfer.FirstValue());
                     curTransfer.GetTxOut(systemSource,
@@ -5859,7 +5949,7 @@ bool CReserveTransactionDescriptor::AddReserveTransferImportOutputs(const CCurre
             if (newOut.nValue < 0)
             {
                 // if we get here, we have absorbed the entire transfer
-                LogPrintf("%s: skip creating output for import to %s\n", __func__, ConnectedChains.GetFriendlyCurrencyName(currencyDest.GetID()).c_str());
+                LogPrint("defi","%s: skip creating output for import to %s\n", __func__, ConnectedChains.GetFriendlyCurrencyName(currencyDest.GetID()).c_str());
             }
             else
             {
@@ -5868,12 +5958,15 @@ bool CReserveTransactionDescriptor::AddReserveTransferImportOutputs(const CCurre
         }
         else
         {
-            if (!curTransfer.destination.IsValid())
+            if (LogAcceptCategory("defi"))
             {
-                printf("%s: Invalid destination for reserve transfer\n", __func__);
+                if (!curTransfer.destination.IsValid())
+                {
+                    printf("%s: Invalid destination for reserve transfer\n", __func__);
+                }
+                printf("%s: Invalid reserve transfer on transfer %s\n", __func__, curTransfer.ToUniValue().write(1,2).c_str());
+                LogPrintf("%s: Invalid reserve transfer: %s\n", __func__, curTransfer.ToUniValue().write(1,2).c_str());
             }
-            printf("%s: Invalid reserve transfer on transfer %s\n", __func__, curTransfer.ToUniValue().write(1,2).c_str());
-            LogPrintf("%s: Invalid reserve transfer: %s\n", __func__, curTransfer.ToUniValue().write(1,2).c_str());
             return false;
         }
     }
@@ -6053,9 +6146,8 @@ bool CReserveTransactionDescriptor::AddReserveTransferImportOutputs(const CCurre
                 scratchCurrencyState.ConvertAmounts(adjustedReserveConverted.AsCurrencyVector(importCurrencyState.currencies),
                                                     fractionalConverted.AsCurrencyVector(importCurrencyState.currencies),
                                                     dummyCurState,
-                                                    ConnectedChains.IsPromoteExchangeRate(height),
                                                     ConnectedChains.IsPBaaSRefundFixActive(height) || (IsVerusActive() && importCurrencyState.GetID() == ConnectedChains.KaijuCurrencyID() && height >= 3448609),
-                                                    ConnectedChains.IsEnhancedUnderflowCheck(height),
+                                                    height,
                                                     state,
                                                     &crossConversions,
                                                     &newCurrencyState.viaConversionPrice);
@@ -6064,6 +6156,7 @@ bool CReserveTransactionDescriptor::AddReserveTransferImportOutputs(const CCurre
                 if (isLaunchComplete)
                 {
                     // unless all conversions are already refunded, refund them all and try again
+                    bool notRefund = false;
                     std::vector<CReserveTransfer> refundedExports;
                     for (auto oneTransfer : exportObjects)
                     {
@@ -6073,33 +6166,40 @@ bool CReserveTransactionDescriptor::AddReserveTransferImportOutputs(const CCurre
                         }
                         else
                         {
+                            notRefund = true;
                             refundedExports.push_back(oneTransfer.GetRefundTransfer());
                         }
                     }
-                    // reset vOutputs to what they were before processing and recurse once
-                    vOutputs = vOldOutputs;
-                    importedCurrency.valueMap.clear();
-                    gatewayDepositsIn.valueMap.clear();
-                    spentCurrencyOut.valueMap.clear();
-
-                    if (updatedPostLaunch)
+                    if (notRefund)
                     {
-                        *this = checkPointThis;
+                        LogPrintf("%s: conversions for %s failed (%s), refunding all %lu transfers\n", __func__,
+                                importCurrencyDef.name.c_str(), state.GetRejectReason().c_str(), exportObjects.size());
+
+                              // reset vOutputs to what they were before processing and recurse once
+                        vOutputs = vOldOutputs;
+                        importedCurrency.valueMap.clear();
+                        gatewayDepositsIn.valueMap.clear();
+                        spentCurrencyOut.valueMap.clear();
+
+                        if (updatedPostLaunch)
+                        {
+                            *this = checkPointThis;
+                        }
+                        return AddReserveTransferImportOutputs(systemSource,
+                                                            systemDest,
+                                                            importCurrencyDef,
+                                                            importCurrencyState,
+                                                            refundedExports,
+                                                            height,
+                                                            vOutputs,
+                                                            importedCurrency,
+                                                            gatewayDepositsIn,
+                                                            spentCurrencyOut,
+                                                            pNewCurrencyState,
+                                                            feeRecipient,
+                                                            blockNotarizer,
+                                                            entropy);
                     }
-                    return AddReserveTransferImportOutputs(systemSource,
-                                                        systemDest,
-                                                        importCurrencyDef,
-                                                        importCurrencyState,
-                                                        refundedExports,
-                                                        height,
-                                                        vOutputs,
-                                                        importedCurrency,
-                                                        gatewayDepositsIn,
-                                                        spentCurrencyOut,
-                                                        pNewCurrencyState,
-                                                        feeRecipient,
-                                                        blockNotarizer,
-                                                        entropy);
                 }
 
                 printf("%s: Invalid currency conversions for import to %s : %s\n", __func__, importCurrencyDef.name.c_str(), EncodeDestination(CIdentityID(importCurrencyDef.GetID())).c_str());
@@ -6593,6 +6693,9 @@ bool CReserveTransactionDescriptor::AddReserveTransferImportOutputs(const CCurre
                 recursiveCurrencyState.SetLaunchConfirmed(false);
             }
 
+            LogPrintf("%s: processing for %s prelaunch or launch import failed, refunding all %lu transfers\n", __func__,
+                    importCurrencyDef.name.c_str(), exportObjects.size());
+
             recursiveCurrencyState.SetRefunding(true);
 
             // reset vOutputs to what they were before processing and recurse once
@@ -6635,6 +6738,9 @@ bool CReserveTransactionDescriptor::AddReserveTransferImportOutputs(const CCurre
             }
             if (notRefund)
             {
+                LogPrintf("%s: processing for %s import failed, refunding all %lu transfers\n", __func__,
+                        importCurrencyDef.name.c_str(), exportObjects.size());
+
                 // reset vOutputs to what they were before processing and recurse once
                 vOutputs = vOldOutputs;
                 importedCurrency.valueMap.clear();
@@ -6832,6 +6938,148 @@ std::vector<CAmount> CReserveTransactionDescriptor::ReserveConversionFeesVec(con
         retVal[curMap[oneInOut.first]] = oneInOut.second.reserveConversionFees;
     }
     return retVal;
+}
+
+CAmount CReserveTransactionDescriptor::CalculateDelayedFees(CAmount &nTotalIn, CCurrencyValueMap &totalReserveIn, uint32_t nHeight,
+                                                            std::set<CUTXORef> *pOrphanArbs,
+                                                            std::list<CTransaction> *pTxesToRemove,
+                                                            std::map<CUTXORef, uint256> *pArbImports) const
+{
+    CAmount delayedFee = 0;
+    if (IsValid())
+    {
+        nTotalIn += nativeIn;
+        totalReserveIn = ReserveInputMap();
+        assert(!totalReserveIn.valueMap.count(ASSETCHAINS_CHAINID));
+
+        if (IsReserveTransfer() || IsImport())
+        {
+            for (int j = 0; j < ptx->vout.size(); j++)
+            {
+                auto &oneOut = ptx->vout[j];
+                COptCCParams p;
+                uint160 oneIdID;
+                if (oneOut.scriptPubKey.IsPayToCryptoCondition(p) &&
+                    p.IsValid() &&
+                    p.version >= p.VERSION_V3 &&
+                    p.vData.size())
+                {
+                    if (p.evalCode == EVAL_CROSSCHAIN_IMPORT)
+                    {
+                        // make sure we spend all of our arbs via imports
+                        CCrossChainImport cci, sysCCI;
+                        CCrossChainExport ccx;
+                        int primaryImportOut;
+                        int32_t sysCCIOut, notarizationOut, evidenceOutStart, evidenceOutEnd;
+                        CPBaaSNotarization importNotarization;
+                        CCurrencyDefinition destSystem;
+                        std::vector<CReserveTransfer> reserveTransfers;
+                        std::vector<CTransaction> arbTxes;
+                        std::vector<CUTXORef> arbTxOuts;
+                        CValidationState state;
+                        if (pOrphanArbs &&
+                            (cci = CCrossChainImport(p.vData[0])).IsValid() &&
+                            !cci.IsSourceSystemImport() &&
+                            (reserveTransfers = cci.GetArbitrageTransfers(*ptx, state, nHeight, &arbTxes, &arbTxOuts)).size() &&
+                            state.IsValid())
+                        {
+                            for (auto &oneRef : arbTxOuts)
+                            {
+                                pOrphanArbs->erase(oneRef);
+                                if (pArbImports)
+                                {
+                                    (*pArbImports)[oneRef] = ptx->GetHash();
+                                }
+                            }
+                        }
+                    }
+                    else if (p.evalCode == EVAL_RESERVE_TRANSFER)
+                    {
+                        //if the destination currency is fractional, this considers the total fee that
+                        // will actually be realized on import as fee for prioritization
+
+                        // make sure we don't export the same identity or currency to the same destination more than once in any block
+                        // we cover the single block case here, and the protocol for each must reject anything relating to prior blocks
+                        CReserveTransfer rt;
+                        CCurrencyDefinition destSystem;
+                        if ((rt = CReserveTransfer(p.vData[0])).IsValid())
+                        {
+                            if (pOrphanArbs && rt.IsArbitrageOnly())
+                            {
+                                pOrphanArbs->insert(CUTXORef(ptx->GetHash(), j));
+                            }
+                            uint160 destCurrencyID = rt.GetImportCurrency();
+                            CCurrencyDefinition destCurrency = ConnectedChains.GetCachedCurrency(destCurrencyID);
+                            CCurrencyDefinition destSystem = ConnectedChains.GetCachedCurrency(destCurrency.SystemOrGatewayID());
+                            CCurrencyDefinition secondLegSystem;
+
+                            if (!destCurrency.IsValid() || !destSystem.IsValid())
+                            {
+                                if (LogAcceptCategory("crosschainexports"))
+                                {
+                                    UniValue jsonTx(UniValue::VOBJ);
+                                    TxToUniv(*ptx, uint256(), jsonTx);
+                                    printf("%s: invalid or inaccessible destination currency/system in reserve transfer in output %d on tx: %s\n", __func__, j, jsonTx.write(1,2).c_str());
+                                    LogPrintf("%s: invalid or inaccessible destination currency/system in reserve transfer in output %d on tx: %s\n", __func__, j, jsonTx.write(1,2).c_str());
+                                }
+                                if (pTxesToRemove)
+                                {
+                                    pTxesToRemove->push_back(*ptx);
+                                }
+                                continue;
+                            }
+
+                            // determine second system dest if there is any, and enforce limits to that system as well
+                            if (rt.destination.HasGatewayLeg() && rt.destination.gatewayID != destSystem.GetID())
+                            {
+                                secondLegSystem = ConnectedChains.GetCachedCurrency(rt.destination.gatewayID);
+                                if (!secondLegSystem.IsValid())
+                                {
+                                    if (LogAcceptCategory("crosschainexports"))
+                                    {
+                                        UniValue jsonTx(UniValue::VOBJ);
+                                        TxToUniv(*ptx, uint256(), jsonTx);
+                                        printf("%s: invalid or inaccessible second leg destination system in reserve transfer in output %d on tx: %s\n", __func__, j, jsonTx.write(1,2).c_str());
+                                        LogPrintf("%s: invalid or inaccessible second leg destination system in reserve transfer in output %d on tx: %s\n", __func__, j, jsonTx.write(1,2).c_str());
+                                    }
+                                    if (pTxesToRemove)
+                                    {
+                                        pTxesToRemove->push_back(*ptx);
+                                    }
+                                    continue;
+                                }
+                            }
+
+                            // if this is a conversion, estimate delayed converted fees
+                            if (destCurrency.IsFractional() &&
+                                rt.IsConversion() &&
+                                !rt.IsPreConversion() &&
+                                nHeight > destCurrency.startBlock)
+                            {
+                                CCurrencyValueMap delayedFees = rt.CalculateFee();
+                                if (delayedFees.valueMap.count(ASSETCHAINS_CHAINID))
+                                {
+                                    delayedFee += delayedFees.valueMap[ASSETCHAINS_CHAINID];
+                                    delayedFees.valueMap.erase(ASSETCHAINS_CHAINID);
+                                }
+                                if (delayedFees.valueMap.size())
+                                {
+                                    CCoinbaseCurrencyState pricingState = ConnectedChains.GetCurrencyState(destCurrency, nHeight);
+                                    for (auto &oneCurFee : delayedFees.valueMap)
+                                    {
+                                        delayedFee += pricingState.ReserveToNativeRaw(
+                                                            oneCurFee.second,
+                                                            pricingState.TargetConversionPrice(oneCurFee.first, ASSETCHAINS_CHAINID));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return delayedFee;
 }
 
 // this should be done no more than once to prepare a currency state to be updated to the next state
@@ -7897,7 +8145,7 @@ int64_t CCostBasisTracker::GetConversionCostBasisNative(const CPBaaSNotarization
 bool ValidateFeePool(struct CCcontract_info *cp, Eval* eval, const CTransaction &tx, uint32_t nIn, bool fulfilled)
 {
     // fee pool output is unspendable
-    return false;
+    return eval->Invalid("fee pool outputs are unspendable");
 }
 
 bool IsFeePoolInput(const CScript &scriptSig)
@@ -7914,6 +8162,7 @@ bool PrecheckFeePool(const CTransaction &tx, int32_t outNum, CValidationState &s
         p.evalCode == EVAL_FEE_POOL &&
         p.vData.size() &&
         (fp = CFeePool(p.vData[0])).IsValid() &&
+        !fp.reserveValues.HasNegative() &&
         p.IsEvalPKOut() &&
         ::AsVector(fp) == p.vData[0])
     {
@@ -8035,11 +8284,10 @@ CAmount GetMinRelayFeeByOutputs(const CReserveTransactionDescriptor &txDesc, con
             if (extraSize || isStorageTx)
             {
                 COptCCParams evP;
-                if ((isStorageTx &&
-                     ((extraSize && isOpRet) ||
+                if (((extraSize && isOpRet) ||
                       (oneOut.scriptPubKey.IsPayToCryptoCondition(evP) &&
                        evP.IsValid() &&
-                       evP.evalCode == EVAL_NOTARY_EVIDENCE))))
+                       evP.evalCode == EVAL_NOTARY_EVIDENCE)))
                 {
                     extraStorageSpace += (int64_t)oneOut.scriptPubKey.size();
                 }

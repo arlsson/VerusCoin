@@ -91,6 +91,7 @@ CNode* FindNode(const std::string& addrName);
 CNode* FindNode(const CService& ip);
 CNode* ConnectNode(CAddress addrConnect, const char *pszDest = NULL);
 bool OpenNetworkConnection(const CAddress& addrConnect, CSemaphoreGrant *grantOutbound = NULL, const char *strDest = NULL, bool fOneShot = false);
+void ClearNonTLSOutbound(const CNetAddr &addr);
 unsigned short GetListenPort();
 bool BindListenPort(const CService &bindAddr, std::string& strError, bool fWhitelisted = false);
 void StartNode(boost::thread_group& threadGroup, CScheduler& scheduler);
@@ -293,6 +294,8 @@ public:
     CCriticalSection cs_vSend;
     CCriticalSection cs_vRecv;
 
+    CCriticalSection cs_sendProcessing;
+
     std::deque<CInv> vRecvGetData;
     std::deque<CNetMessage> vRecvMsg;
     CCriticalSection cs_vRecvMsg;
@@ -338,6 +341,10 @@ public:
     // Inventory based relay
     // This filter is protected by cs_inventory and contains both txids and wtxids.
     CRollingBloomFilter filterInventoryKnown;
+
+    uint64_t nBytesServedRelay;
+    uint32_t nGetDataUnannounced;
+    int64_t nLastMempoolReq;
 
 protected:
 

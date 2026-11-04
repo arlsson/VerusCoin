@@ -121,7 +121,7 @@ void UpdateTime(CBlockHeader* pblock, const Consensus::Params& consensusParams, 
 #include "komodo_defs.h"
 
 extern CCriticalSection cs_metrics;
-extern int32_t KOMODO_MININGTHREADS,KOMODO_LONGESTCHAIN,IS_KOMODO_NOTARY,USE_EXTERNAL_PUBKEY,KOMODO_CHOSEN_ONE,ASSETCHAIN_INIT,KOMODO_INITDONE,KOMODO_INITDONE,KOMODO_PASSPORT_INITDONE;
+extern int32_t KOMODO_MININGTHREADS,KOMODO_LONGESTCHAIN,IS_KOMODO_NOTARY,USE_EXTERNAL_PUBKEY,KOMODO_CHOSEN_ONE,ASSETCHAIN_INIT,KOMODO_PASSPORT_INITDONE;
 extern uint64_t ASSETCHAINS_COMMISSION, ASSETCHAINS_STAKED;
 extern bool VERUS_MINTBLOCKS;
 extern uint64_t ASSETCHAINS_REWARD[ASSETCHAINS_MAX_ERAS], ASSETCHAINS_TIMELOCKGTE, ASSETCHAINS_NONCEMASK[];
@@ -144,7 +144,6 @@ uint32_t Mining_start, Mining_height;
 int32_t My_notaryid = -1;
 
 void vcalc_sha256(char deprecated[(256 >> 3) * 2 + 1],uint8_t hash[256 >> 3],uint8_t *src,int32_t len);
-int32_t komodo_baseid(char *origbase);
 int32_t komodo_validate_interest(const CTransaction &tx,int32_t txheight,uint32_t nTime,int32_t dispflag);
 uint64_t komodo_commission(const CBlock *block);
 int32_t verus_staked(CBlock *pBlock, CMutableTransaction &txNew, uint32_t &nBits, arith_uint256 &hashResult, std::vector<unsigned char> &utxosig, CTxDestination &rewardDest);
@@ -604,7 +603,8 @@ bool CheckNotaryConnection(const CRPCChainData &notarySystem)
     return true;
 }
 
-bool CallNotary(const CRPCChainData &notarySystem, std::string command, const UniValue &params, UniValue &result, UniValue &error)
+bool CallNotary(const CRPCChainData &notarySystem, std::string command, const UniValue &params, UniValue &result, UniValue &error, int timeout=15);
+bool CallNotary(const CRPCChainData &notarySystem, std::string command, const UniValue &params, UniValue &result, UniValue &error, int timeout)
 {
     // ensure we have connection parameters, or we fail
     if (!CheckNotaryConnection(notarySystem))
@@ -614,7 +614,7 @@ bool CallNotary(const CRPCChainData &notarySystem, std::string command, const Un
 
     try
     {
-        UniValue rpcResult = RPCCall(command, params, notarySystem.rpcUserPass, notarySystem.rpcPort, notarySystem.rpcHost);
+        UniValue rpcResult = RPCCall(command, params, notarySystem.rpcUserPass, notarySystem.rpcPort, notarySystem.rpcHost, timeout);
         result = find_value(rpcResult, "result");
         error = find_value(rpcResult, "error");
     } catch (std::exception e)
@@ -1552,7 +1552,7 @@ bool IsValidBlockOneCoinbase(const std::vector<CTxOut> &_outputs,
 
         if (!validOutputs)
         {
-            return state.Error("Unable to make comparison outputs");
+            return TransientError(state, "Unable to make comparison outputs");
         }
 
         // setup fee pool
@@ -2422,13 +2422,15 @@ CBlockTemplate* CreateNewBlock(const CChainParams& chainparams, const std::vecto
         bool notaryConnected = ConnectedChains.IsNotaryAvailable();
         uint32_t solutionVersion = CConstVerusSolutionVector::GetVersionByHeight(nHeight);
 
+        CRPCChainData notaryChain = ConnectedChains.FirstNotaryChain();
+
         if (isVerusActive &&
             solutionVersion >= CActivationHeight::ACTIVATE_PBAAS &&
             !notaryConnected)
         {
             // until we have connected to the ETH bridge, after PBaaS has launched, we check each block to see if there is now an
             // ETH bridge defined
-            if (ConnectedChains.FirstNotaryChain().IsValid())
+            if (notaryChain.IsValid())
             {
                 // once PBaaS is active, we attempt to connect to the Ethereum bridge, in case it is active
                 notaryConnected = ConnectedChains.IsNotaryAvailable(true);
@@ -2436,6 +2438,7 @@ CBlockTemplate* CreateNewBlock(const CChainParams& chainparams, const std::vecto
             else
             {
                 notaryConnected = ConnectedChains.ConfigureEthBridge(true);
+                notaryChain = ConnectedChains.FirstNotaryChain();
             }
         }
 
@@ -2486,9 +2489,8 @@ CBlockTemplate* CreateNewBlock(const CChainParams& chainparams, const std::vecto
             std::vector<TransactionBuilder> notarizationBuilders;
             std::vector<CTransaction> notarizations;
             CTransaction notarizationTx;
-            const CRPCChainData &notaryChain = ConnectedChains.FirstNotaryChain();
             if (notaryChain.IsValid() &&
-                CPBaaSNotarization::ConfirmOrRejectNotarizations(pwalletMain, ConnectedChains.FirstNotaryChain(), state, notarizationBuilders, Mining_height) &&
+                CPBaaSNotarization::ConfirmOrRejectNotarizations(pwalletMain, notaryChain, state, notarizationBuilders, nHeight) &&
                 notarizationBuilders.size())
             {
                 int txCount = 0;
@@ -2549,7 +2551,7 @@ CBlockTemplate* CreateNewBlock(const CChainParams& chainparams, const std::vecto
                                 else
                                 {
                                     // first try to pay with native currency, then the notary chain's currency
-                                    CCurrencyValueMap totalTxFees({ConnectedChains.FirstNotaryChain().chainDefinition.GetID(), ASSETCHAINS_CHAINID},
+                                    CCurrencyValueMap totalTxFees({notaryChain.chainDefinition.GetID(), ASSETCHAINS_CHAINID},
                                                                    {CPBaaSNotarization::DEFAULT_NOTARIZATION_FEE, CPBaaSNotarization::DEFAULT_NOTARIZATION_FEE});
                                     nativeValueOut = CPBaaSNotarization::DEFAULT_NOTARIZATION_FEE;
                                     notarizationBuilder.SetReserveFee(CCurrencyValueMap());
@@ -2784,8 +2786,8 @@ CBlockTemplate* CreateNewBlock(const CChainParams& chainparams, const std::vecto
                     CUTXORef lastImportNotarizationUTXO;
                     CValidationState state;
 
-                    CPBaaSNotarization::SubmitFinalizedNotarizations(ConnectedChains.FirstNotaryChain(), state);
-                    ProcessNewImports(ConnectedChains.FirstNotaryChain().chainDefinition.GetID(), lastImportNotarization, lastImportNotarizationUTXO, nHeight);
+                    CPBaaSNotarization::SubmitFinalizedNotarizations(notaryChain, state);
+                    ProcessNewImports(notaryChain.chainDefinition.GetID(), lastImportNotarization, lastImportNotarizationUTXO, nHeight);
                 }
                 return NULL;
             }
@@ -2806,7 +2808,7 @@ CBlockTemplate* CreateNewBlock(const CChainParams& chainparams, const std::vecto
             if (nHeight != 1 && !(VERUS_NOTARYID.IsNull() && VERUS_DEFAULTID.IsNull() && VERUS_NODEID.IsNull()))
             {
                 CTransferDestination proposer;
-                if (firstDestination.which() == COptCCParams::ADDRTYPE_INVALID)
+                if (firstDestination.which() != COptCCParams::ADDRTYPE_ID && firstDestination.which() != COptCCParams::ADDRTYPE_PK && firstDestination.which() != COptCCParams::ADDRTYPE_PKH)
                 {
                     proposer = DestinationToTransferDestination(CIdentityID(VERUS_DEFAULTID.IsNull() ? (VERUS_NODEID.IsNull() ? VERUS_NOTARYID : VERUS_NODEID) : VERUS_DEFAULTID));
                 }
@@ -2824,7 +2826,7 @@ CBlockTemplate* CreateNewBlock(const CChainParams& chainparams, const std::vecto
                 CPBaaSNotarization earnedNotarization;
 
                 int numOuts = coinbaseTx.vout.size();
-                if (CPBaaSNotarization::CreateEarnedNotarization(ConnectedChains.FirstNotaryChain(),
+                if (CPBaaSNotarization::CreateEarnedNotarization(notaryChain,
                                                                  proposer,
                                                                  isStake,
                                                                  state,
@@ -2838,8 +2840,8 @@ CBlockTemplate* CreateNewBlock(const CChainParams& chainparams, const std::vecto
                 CPBaaSNotarization lastImportNotarization;
                 CUTXORef lastImportNotarizationUTXO;
 
-                CPBaaSNotarization::SubmitFinalizedNotarizations(ConnectedChains.FirstNotaryChain(), state);
-                ProcessNewImports(ConnectedChains.FirstNotaryChain().chainDefinition.GetID(), lastImportNotarization, lastImportNotarizationUTXO, nHeight);
+                CPBaaSNotarization::SubmitFinalizedNotarizations(notaryChain, state);
+                ProcessNewImports(notaryChain.chainDefinition.GetID(), lastImportNotarization, lastImportNotarizationUTXO, nHeight);
             }
         }
 
@@ -2849,6 +2851,12 @@ CBlockTemplate* CreateNewBlock(const CChainParams& chainparams, const std::vecto
 
         CCoinsViewCache view(pcoinsTip);
         SaplingMerkleTree sapling_tree;
+
+        // spend the stake input first so that any mempool transaction spending the same output, and its descendants, are left out
+        if (isStake)
+        {
+            UpdateCoins(txStaked, view, nHeight);
+        }
 
         if (!(view.GetSaplingAnchorAt(view.GetBestAnchor(SAPLING), sapling_tree)))
         {
@@ -2912,6 +2920,7 @@ CBlockTemplate* CreateNewBlock(const CChainParams& chainparams, const std::vecto
 
         std::list<CTransaction> txesToRemove;
         std::set<CUTXORef> orphanArbs;
+        std::map<CUTXORef, uint256> arbImports;      // every arbitrage transfer an unexpired import will consume
 
         // now add transactions from the mem pool to the priority heap
         for (CTxMemPool::indexed_transaction_set::iterator mi = mempool.mapTx.begin();
@@ -2947,127 +2956,7 @@ CBlockTemplate* CreateNewBlock(const CChainParams& chainparams, const std::vecto
             CReserveTransactionDescriptor rtxd;
             bool isReserve = mempool.IsKnownReserveTransaction(hash, rtxd);
 
-            CAmount delayedFee = 0;
-            if (isReserve)
-            {
-                nTotalIn += rtxd.nativeIn;
-                totalReserveIn = rtxd.ReserveInputMap();
-                assert(!totalReserveIn.valueMap.count(ASSETCHAINS_CHAINID));
-
-                if (rtxd.IsReserveTransfer() || rtxd.IsImport())
-                {
-                    for (int j = 0; j < tx.vout.size(); j++)
-                    {
-                        auto &oneOut = tx.vout[j];
-                        COptCCParams p;
-                        uint160 oneIdID;
-                        if (oneOut.scriptPubKey.IsPayToCryptoCondition(p) &&
-                            p.IsValid() &&
-                            p.version >= p.VERSION_V3 &&
-                            p.vData.size())
-                        {
-                            if (p.evalCode == EVAL_CROSSCHAIN_IMPORT)
-                            {
-                                // make sure we spend all of our arbs via imports
-                                CCrossChainImport cci, sysCCI;
-                                CCrossChainExport ccx;
-                                int primaryImportOut;
-                                int32_t sysCCIOut, notarizationOut, evidenceOutStart, evidenceOutEnd;
-                                CPBaaSNotarization importNotarization;
-                                CCurrencyDefinition destSystem;
-                                std::vector<CReserveTransfer> reserveTransfers;
-                                std::vector<CTransaction> arbTxes;
-                                std::vector<CUTXORef> arbTxOuts;
-                                if ((cci = CCrossChainImport(p.vData[0])).IsValid() &&
-                                    !cci.IsSourceSystemImport() &&
-                                    (reserveTransfers = cci.GetArbitrageTransfers(tx, state, nHeight, &arbTxes, &arbTxOuts)).size())
-                                {
-                                    for (auto &oneRef : arbTxOuts)
-                                    {
-                                        orphanArbs.erase(oneRef);
-                                    }
-                                }
-                            }
-                            else if (p.evalCode == EVAL_RESERVE_TRANSFER)
-                            {
-                                //if the destination currency is fractional, this considers the total fee that
-                                // will actually be realized on import as fee for prioritization
-
-                                // make sure we don't export the same identity or currency to the same destination more than once in any block
-                                // we cover the single block case here, and the protocol for each must reject anything relating to prior blocks
-                                CReserveTransfer rt;
-                                CCurrencyDefinition destSystem;
-                                if ((rt = CReserveTransfer(p.vData[0])).IsValid())
-                                {
-                                    if (rt.IsArbitrageOnly())
-                                    {
-                                        orphanArbs.insert(CUTXORef(tx.GetHash(), j));
-                                    }
-                                    uint160 destCurrencyID = rt.GetImportCurrency();
-                                    CCurrencyDefinition destCurrency = ConnectedChains.GetCachedCurrency(destCurrencyID);
-                                    CCurrencyDefinition destSystem = ConnectedChains.GetCachedCurrency(destCurrency.SystemOrGatewayID());
-                                    CCurrencyDefinition secondLegSystem;
-
-                                    if (!destCurrency.IsValid() || !destSystem.IsValid())
-                                    {
-                                        if (LogAcceptCategory("crosschainexports"))
-                                        {
-                                            UniValue jsonTx(UniValue::VOBJ);
-                                            TxToUniv(tx, uint256(), jsonTx);
-                                            printf("%s: invalid or inaccessible destination currency/system in reserve transfer in output %d on tx: %s\n", __func__, j, jsonTx.write(1,2).c_str());
-                                            LogPrintf("%s: invalid or inaccessible destination currency/system in reserve transfer in output %d on tx: %s\n", __func__, j, jsonTx.write(1,2).c_str());
-                                        }
-                                        txesToRemove.push_back(tx);
-                                        continue;
-                                    }
-
-                                    // determine second system dest if there is any, and enforce limits to that system as well
-                                    if (rt.destination.HasGatewayLeg() && rt.destination.gatewayID != destSystem.GetID())
-                                    {
-                                        secondLegSystem = ConnectedChains.GetCachedCurrency(rt.destination.gatewayID);
-                                        if (!secondLegSystem.IsValid())
-                                        {
-                                            if (LogAcceptCategory("crosschainexports"))
-                                            {
-                                                UniValue jsonTx(UniValue::VOBJ);
-                                                TxToUniv(tx, uint256(), jsonTx);
-                                                printf("%s: invalid or inaccessible second leg destination system in reserve transfer in output %d on tx: %s\n", __func__, j, jsonTx.write(1,2).c_str());
-                                                LogPrintf("%s: invalid or inaccessible second leg destination system in reserve transfer in output %d on tx: %s\n", __func__, j, jsonTx.write(1,2).c_str());
-                                            }
-                                            txesToRemove.push_back(tx);
-                                            continue;
-                                        }
-                                    }
-
-                                    // if this is a conversion, estimate delayed converted fees
-                                    if (destCurrency.IsFractional() &&
-                                        rt.IsConversion() &&
-                                        !rt.IsPreConversion() &&
-                                        nHeight > destCurrency.startBlock)
-                                    {
-                                        CCurrencyValueMap delayedFees = rt.CalculateFee();
-                                        if (delayedFees.valueMap.count(ASSETCHAINS_CHAINID))
-                                        {
-                                            delayedFee += delayedFees.valueMap[ASSETCHAINS_CHAINID];
-                                            delayedFees.valueMap.erase(ASSETCHAINS_CHAINID);
-                                        }
-                                        if (delayedFees.valueMap.size())
-                                        {
-                                            CCoinbaseCurrencyState pricingState = ConnectedChains.GetCurrencyState(destCurrency, nHeight);
-                                            for (auto &oneCurFee : delayedFees.valueMap)
-                                            {
-                                                delayedFee += pricingState.ReserveToNativeRaw(
-                                                                    oneCurFee.second,
-                                                                    pricingState.TargetConversionPrice(oneCurFee.first, ASSETCHAINS_CHAINID));
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            CAmount delayedFee = isReserve ? rtxd.CalculateDelayedFees(nTotalIn, totalReserveIn, nHeight, &orphanArbs, &txesToRemove, &arbImports) : 0;
 
             for (int inNum = 0; inNum < tx.vin.size(); inNum++)
             {
@@ -3088,7 +2977,7 @@ CBlockTemplate* CreateNewBlock(const CChainParams& chainparams, const std::vecto
                         fMissingInputs = true;
 
                         txesToRemove.push_back(tx);
-        
+
                         if (porphan)
                         {
                             for (int inNumStart = 0; inNumStart < inNum; inNumStart++)
@@ -3193,6 +3082,25 @@ CBlockTemplate* CreateNewBlock(const CChainParams& chainparams, const std::vecto
             {
                 vecPriTxMap.insert({tx.GetHash(), vecPriority.size()});
                 vecPriority.push_back(TxPriority(dPriority, feeRate, &(mi->GetTx())));
+            }
+        }
+
+        //  finish the reconciliation here and drop pairings whose import is queued for removal
+        std::set<uint256> removingTxIds;
+        for (auto &oneTx : txesToRemove)
+        {
+            removingTxIds.insert(oneTx.GetHash());
+        }
+        for (auto arbIt = arbImports.begin(); arbIt != arbImports.end(); )
+        {
+            if (removingTxIds.count(arbIt->second))
+            {
+                arbIt = arbImports.erase(arbIt);
+            }
+            else
+            {
+                orphanArbs.erase(arbIt->first);
+                arbIt++;
             }
         }
 
@@ -3511,7 +3419,7 @@ CBlockTemplate* CreateNewBlock(const CChainParams& chainparams, const std::vecto
                                             {
                                                 int32_t exportShiftCount = IsAfterBridgeCleanupWindowStarts(pblock->nTime) ? 1 : 0;
                                                 uint160 secondLegID = secondLegSystem.SystemOrGatewayID();
-                                                if ((++tmpExportTransfers[secondLegID].first + exportTransferCount[secondLegID].first) > (secondLegSystem.MaxTransferExportCount() >> exportShiftCount) ||
+                                                if ((++tmpExportTransfers[secondLegID].first + exportTransferCount[secondLegID].first) > (secondLegSystem.MaxTransferExportCount(pblock->nTime) >> exportShiftCount) ||
                                                     ((tmpExportTransfers[secondLegID].second += rt.NextLegSizeAttribution(oneOut.scriptPubKey.size())) +
                                                         exportTransferCount[secondLegID].second) > (secondLegSystem.MaxTransferExportSize() >> exportShiftCount))
                                                 {
@@ -3582,7 +3490,7 @@ CBlockTemplate* CreateNewBlock(const CChainParams& chainparams, const std::vecto
                                             }
                                         }
 
-                                        if ((++tmpExportTransfers[destCurrencyID].first + exportTransferCount[destCurrencyID].first) > destSystem.MaxTransferExportCount() ||
+                                        if ((++tmpExportTransfers[destCurrencyID].first + exportTransferCount[destCurrencyID].first) > destSystem.MaxTransferExportCount(pblock->nTime) ||
                                             ((tmpExportTransfers[destCurrencyID].second += oneOut.scriptPubKey.size()) +
                                                         exportTransferCount[destCurrencyID].second) > destSystem.MaxTransferExportSize() ||
                                             (rt.IsCurrencyExport() && (++tmpCurrencyExportTransfers[destCurrencyID] + currencyExportTransferCount[destCurrencyID]) > destSystem.MaxCurrencyDefinitionExportCount()) ||
@@ -3701,6 +3609,51 @@ CBlockTemplate* CreateNewBlock(const CChainParams& chainparams, const std::vecto
             }
         }
 
+        // mirror ConnectBlock's rule that no arbitrage-only transfer may be in a block without the import that
+        // consumes it. the scan paired every such transfer with its import; if the transfer was added above and
+        // the import was then skipped, the block would be rejected, so remove the transfer and anything spending it
+        if (arbImports.size())
+        {
+            std::set<uint256> blockTxIds;
+            for (int i = 1; i < pblock->vtx.size(); i++)
+            {
+                blockTxIds.insert(pblock->vtx[i].GetHash());
+            }
+            std::set<uint256> removedTxIds;
+            for (auto &oneArbImport : arbImports)
+            {
+                if (blockTxIds.count(oneArbImport.first.hash) && !blockTxIds.count(oneArbImport.second))
+                {
+                    removedTxIds.insert(oneArbImport.first.hash);
+                }
+            }
+            for (int i = 1; removedTxIds.size() && i < pblock->vtx.size(); )
+            {
+                const CTransaction &oneTx = pblock->vtx[i];
+                bool remove = removedTxIds.count(oneTx.GetHash());
+                for (int k = 0; !remove && k < oneTx.vin.size(); k++)
+                {
+                    remove = removedTxIds.count(oneTx.vin[k].prevout.hash);
+                }
+                if (remove)
+                {
+                    LogPrintf("%s: removing orphaned arbitrage transaction %s from block\n", __func__, oneTx.GetHash().GetHex().c_str());
+                    removedTxIds.insert(oneTx.GetHash());
+                    nBlockSize -= ::GetSerializeSize(oneTx, SER_NETWORK, PROTOCOL_VERSION);
+                    nBlockSigOps -= pblocktemplate->vTxSigOps[i];
+                    nFees -= pblocktemplate->vTxFees[i];
+                    nBlockTx--;
+                    pblock->vtx.erase(pblock->vtx.begin() + i);
+                    pblocktemplate->vTxFees.erase(pblocktemplate->vTxFees.begin() + i);
+                    pblocktemplate->vTxSigOps.erase(pblocktemplate->vTxSigOps.begin() + i);
+                }
+                else
+                {
+                    i++;
+                }
+            }
+        }
+
         // remove transactions that we should from the mempool
         for (auto &oneTx : txesToRemove)
         {
@@ -3747,6 +3700,7 @@ CBlockTemplate* CreateNewBlock(const CChainParams& chainparams, const std::vecto
                 feePool.reserveValues.valueMap[VERUS_CHAINID] -= verusFees;
             }
 
+            feePool.reserveValues = feePool.reserveValues.CanonicalMap();
             cp = CCinit(&CC, EVAL_FEE_POOL);
             pkCC = CPubKey(ParseHex(CC.CChexstr));
             coinbaseTx.vout.push_back(CTxOut(0,MakeMofNCCScript(CConditionObj<CFeePool>(EVAL_FEE_POOL,{pkCC.GetID()},1,&feePool))));
@@ -3844,7 +3798,6 @@ CBlockTemplate* CreateNewBlock(const CChainParams& chainparams, const std::vecto
         // if there is a stake transaction, add it to the very end
         if (isStake)
         {
-            UpdateCoins(txStaked, view, nHeight);
             pblock->vtx.push_back(txStaked);
             pblocktemplate->vTxFees.push_back(0);
             int txSigOps = GetLegacySigOpCount(txStaked);
@@ -4061,8 +4014,6 @@ static bool ProcessBlockFound(CBlock* pblock)
     return true;
 }
 
-int32_t komodo_baseid(char *origbase);
-arith_uint256 komodo_PoWtarget(int32_t *percPoSp,arith_uint256 target,int32_t height,int32_t goalperc);
 int32_t FOUND_BLOCK,KOMODO_MAYBEMINED;
 extern int32_t KOMODO_LASTMINED,KOMODO_INSYNC;
 int32_t roundrobin_delay;
@@ -4164,13 +4115,6 @@ void static VerusStaker(CWallet *pwallet)
     unsigned int nExtraNonce = 0;
 
     uint8_t *script; uint64_t total,checktoshis; int32_t i,j;
-
-    while ( (ASSETCHAIN_INIT == 0 || KOMODO_INITDONE == 0) ) //chainActive.Tip()->GetHeight() != 235300 &&
-    {
-        sleep(1);
-        if ( komodo_baseid(ASSETCHAINS_SYMBOL) < 0 )
-            break;
-    }
 
     // try a nice clean peer connection to start
     CBlockIndex *pindexPrev, *pindexCur;
@@ -4295,6 +4239,7 @@ void static VerusStaker(CWallet *pwallet)
 
             if (ProcessBlockFound(pblock, *pwallet, reservekey))
             {
+                LOCK(cs_main);
                 LogPrintf("Using %s algorithm:\n", ASSETCHAINS_ALGORITHMS[ASSETCHAINS_ALGO]);
                 LogPrintf("Staked block found  \n  hash: %s  \ntarget: %s\n", pblock->GetHash().GetHex(), hashTarget.GetHex());
                 printf("Found block %d \n", newHeight);
@@ -4365,13 +4310,6 @@ void static BitcoinMiner_noeq()
     unsigned int nExtraNonce = 0;
 
     uint8_t *script; uint64_t total,checktoshis; int32_t i,j;
-
-    while ( (ASSETCHAIN_INIT == 0 || KOMODO_INITDONE == 0) ) //chainActive.Tip()->GetHeight() != 235300 &&
-    {
-        sleep(1);
-        if ( komodo_baseid(ASSETCHAINS_SYMBOL) < 0 )
-            break;
-    }
 
     SetThreadPriority(THREAD_PRIORITY_LOWEST);
 
@@ -4661,6 +4599,12 @@ void static BitcoinMiner_noeq()
                                 fprintf(stderr,"no nodes, attempting reconnect\n");
                                 break;
                             }
+                        }
+
+                        // the shared block time moved (root tip advanced or its clock rule fired); our committed MMR root is stale
+                        if (ConnectedChains.GetNextBlockTime(pindexPrev) != pblock->nTime)
+                        {
+                            break;
                         }
 
                         // update every few minutes, regardless

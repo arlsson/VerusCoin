@@ -154,6 +154,7 @@ public:
     }
     virtual bool IsIDMapSet() const { return false; }
     virtual bool CanValidateIDs() const { return false; }
+    virtual uint32_t SpendHeight() const { return INT32_MAX; }
 
     virtual ~BaseSignatureChecker() {}
 };
@@ -167,6 +168,7 @@ protected:
     const PrecomputedTransactionData* txdata;
     std::map<uint160, std::pair<int, std::vector<std::vector<unsigned char>>>> idMap;
     bool idMapSet;
+    uint32_t nSpendHeight;
 
     virtual bool VerifySignature(const std::vector<unsigned char>& vchSig, const CPubKey& vchPubKey, const uint256& sighash) const;
 
@@ -175,23 +177,24 @@ public:
     TransactionSignatureChecker(const CTransaction* txToIn, unsigned int nInIn, const CAmount& amountIn, const PrecomputedTransactionData& txdataIn, const std::map<uint160, std::pair<int, std::vector<std::vector<unsigned char>>>> *pIdMap);
     TransactionSignatureChecker(const CTransaction* txToIn, unsigned int nInIn, const CAmount& amountIn, const CScript *pScriptPubKeyIn=nullptr, const CKeyStore *pKeyStore=nullptr, uint32_t spendHeight=INT32_MAX);
     TransactionSignatureChecker(const CTransaction* txToIn, unsigned int nInIn, const CAmount& amountIn, const PrecomputedTransactionData& txdataIn, const CScript *pScriptPubKeyIn=nullptr, const CKeyStore *pKeyStore=nullptr, uint32_t spendHeight=INT32_MAX);
-    bool CheckSig(const std::vector<unsigned char>& scriptSig, const std::vector<unsigned char>& vchPubKey, const CScript& scriptCode, uint32_t consensusBranchId) const;
-    bool CheckLockTime(const CScriptNum& nLockTime) const;
-    void SetIDMap(const std::map<uint160, std::pair<int, std::vector<std::vector<unsigned char>>>> &map)
+    bool CheckSig(const std::vector<unsigned char>& scriptSig, const std::vector<unsigned char>& vchPubKey, const CScript& scriptCode, uint32_t consensusBranchId) const override;
+    bool CheckLockTime(const CScriptNum& nLockTime) const override;
+    void SetIDMap(const std::map<uint160, std::pair<int, std::vector<std::vector<unsigned char>>>> &map) override
     {
         idMapSet = true;
         idMap = map;
     }
-    std::map<uint160, std::pair<int, std::vector<std::vector<unsigned char>>>> IDMap()
+    std::map<uint160, std::pair<int, std::vector<std::vector<unsigned char>>>> IDMap() override
     {
         return idMap;
     }
-    bool IsIDMapSet() const { return idMapSet; }
+    bool IsIDMapSet() const override { return idMapSet; }
+    uint32_t SpendHeight() const override { return nSpendHeight; }
     int CheckCryptoCondition(
         const std::vector<unsigned char>& condBin,
         const std::vector<unsigned char>& ffillBin,
         const CScript& scriptCode,
-        uint32_t consensusBranchId) const;
+        uint32_t consensusBranchId) const override;
     virtual int CheckEvalCondition(const CC *cond, int fulfilled) const;
 };
 

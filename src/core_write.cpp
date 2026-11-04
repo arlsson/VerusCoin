@@ -541,10 +541,10 @@ CAmount CCurrencyState::ReserveToNativeRaw(CAmount reserveAmount, CAmount exchan
         bigRetVal = (exchangeRate != bigZero ? (bigAmount * bigSatoshi) / exchangeRate : bigZero);
     }
 
-    int64_t retVal = bigRetVal.GetLow64();
-    if ((bigRetVal - retVal) == 0)
+    static const arith_uint256 bigInt64Max((uint64_t)INT64_MAX);
+    if (bigRetVal <= bigInt64Max)
     {
-        return retVal;
+        return (int64_t)bigRetVal.GetLow64();
     }
     else
     {
@@ -633,10 +633,10 @@ CAmount CCurrencyState::NativeToReserveRaw(CAmount nativeAmount, CAmount exchang
         bigReserves = (bigAmount * exchangeRate) / bigSatoshi;
     }
 
-    int64_t retVal = bigReserves.GetLow64();
-    if ((bigReserves - retVal) == 0)
+    static const arith_uint256 bigInt64Max((uint64_t)INT64_MAX);
+    if (bigReserves <= bigInt64Max)
     {
-        return retVal;
+        return (int64_t)bigReserves.GetLow64();
     }
     else
     {
@@ -667,10 +667,10 @@ CAmount CCurrencyState::NativeGasToReserveRaw(CAmount nativeAmount, CAmount exch
         bigReserves = (bigAmount * exchangeRate) / bigSatoshiX1000;
     }
 
-    int64_t retVal = bigReserves.GetLow64();
-    if ((bigReserves - retVal) == 0)
+    static const arith_uint256 bigInt64Max((uint64_t)INT64_MAX);
+    if (bigReserves <= bigInt64Max)
     {
-        return retVal;
+        return (int64_t)bigReserves.GetLow64();
     }
     else
     {
@@ -960,6 +960,7 @@ UniValue CTransferDestination::ToUniValue() const
 {
     UniValue destVal = UniValue(UniValue::VOBJ);
     uint8_t newType = type;
+    size_t dSize = destination.size();
 
     switch (TypeNoFlags())
     {
@@ -972,23 +973,23 @@ UniValue CTransferDestination::ToUniValue() const
         }
 
         case CTransferDestination::DEST_PKH:
-            destVal.push_back(Pair("address", EncodeDestination(CKeyID(uint160(destination)))));
+            destVal.push_back(Pair("address", dSize != 20 ? ("invaliddest:" + (dSize ? HexBytes(&destination[0], dSize) : "")) : EncodeDestination(CKeyID(uint160(destination)))));
             break;
 
         case CTransferDestination::DEST_SH:
-            destVal.push_back(Pair("address", EncodeDestination(CScriptID(uint160(destination)))));
+            destVal.push_back(Pair("address", dSize != 20 ? ("invaliddest:" + (dSize ? HexBytes(&destination[0], dSize) : "")) : EncodeDestination(CScriptID(uint160(destination)))));
             break;
 
         case CTransferDestination::DEST_ID:
-            destVal.push_back(Pair("address", EncodeDestination(CIdentityID(uint160(destination)))));
+            destVal.push_back(Pair("address", dSize != 20 ? ("invaliddest:" + (dSize ? HexBytes(&destination[0], dSize) : "")) : EncodeDestination(CIdentityID(uint160(destination)))));
             break;
 
         case CTransferDestination::DEST_QUANTUM:
-            destVal.push_back(Pair("address", EncodeDestination(CQuantumID(uint160(destination)))));
+            destVal.push_back(Pair("address", dSize != 20 ? ("invaliddest:" + (dSize ? HexBytes(&destination[0], dSize) : "")) : EncodeDestination(CQuantumID(uint160(destination)))));
             break;
 
         case CTransferDestination::DEST_ETH:
-            destVal.push_back(Pair("address", EncodeEthDestination(uint160(destination))));
+            destVal.push_back(Pair("address", dSize != 20 ? ("invaliddest:" + (dSize ? HexBytes(&destination[0], dSize) : "")) : EncodeEthDestination(uint160(destination))));
             break;
 
         case CTransferDestination::DEST_ETHNFT:
@@ -996,32 +997,39 @@ UniValue CTransferDestination::ToUniValue() const
             CETHNFTAddress oneAddr;
             bool success = false;
             ::FromVector(destination, oneAddr, &success);
-            destVal.push_back(Pair("address", success ? oneAddr.ToUniValue() : UniValue(UniValue::VOBJ)));
+            destVal.push_back(Pair("address", (success && (::AsVector(oneAddr) == destination)) ? oneAddr.ToUniValue() : UniValue(UniValue::VOBJ)));
             break;
         }
 
         case CTransferDestination::DEST_FULLID:
-            destVal.push_back(Pair("identity", CIdentity(destination).ToUniValue()));
-            destVal.push_back(Pair("serializeddata", HexBytes(&(destination[0]), destination.size())));
+        {
+            CIdentity _curIdentity(destination);
+            destVal.push_back(Pair("identity", _curIdentity.IsValid() ? _curIdentity.ToUniValue() : "invalid:"));
+            destVal.push_back(Pair("serializeddata", (dSize ? HexBytes(&destination[0], dSize) : "")));
             break;
+        }
 
         case CTransferDestination::DEST_REGISTERCURRENCY:
         {
-            destVal.push_back(Pair("currency", CCurrencyDefinition(destination).ToUniValue()));
-            destVal.push_back(Pair("serializeddata", HexBytes(&(destination[0]), destination.size())));
+            CCurrencyDefinition _curDef(destination);
+            destVal.push_back(Pair("currency", _curDef.IsValid() ? _curDef.ToUniValue() : "invalid"));
+            destVal.push_back(Pair("serializeddata", (dSize ? HexBytes(&destination[0], dSize) : "")));
             break;
         }
 
         case CTransferDestination::DEST_RAW:
-            destVal.push_back(Pair("address", HexBytes(&(destination[0]),destination.size())));
+            destVal.push_back(Pair("address", (dSize ? HexBytes(&destination[0], dSize) : "")));
             break;
 
         case CTransferDestination::DEST_NESTEDTRANSFER:
-            destVal.push_back(Pair("nestedtransfer", CReserveTransfer(destination).ToUniValue()));
+        {
+            CReserveTransfer _curTransfer(destination);
+            destVal.push_back(Pair("nestedtransfer", _curTransfer.IsValid() ? _curTransfer.ToUniValue() : "invalid:" + (dSize ? HexBytes(&destination[0], dSize) : "")));
             break;
+        }
 
         default:
-            destVal.push_back(Pair("undefined", ""));
+            destVal.push_back(Pair("undefined", (dSize ? HexBytes(&destination[0], dSize) : "")));
             break;
     }
     if ((type & FLAG_DEST_AUX))
@@ -1060,6 +1068,7 @@ UniValue CTransferDestination::ToUniValue() const
         }
         destVal.push_back(Pair("gateway", EncodeDestination(CIdentityID(gatewayID))));
         destVal.push_back(Pair("fees", ValueFromAmount(fees)));
+        destVal.push_back(Pair("gatewaycode", EncodeDestination(CIdentityID(gatewayCode))));
     }
     destVal.push_back(Pair("type", newType));
     return destVal;
@@ -1894,8 +1903,10 @@ CStakeParams::CStakeParams(const std::vector<std::vector<unsigned char>> &vData)
     {
         ::FromVector(vData[1], *this);
     }
-    else if (vData[0].size() == 1 &&
-        vData[0][0] == OPRETTYPE_STAKEPARAMS && vData[1].size() <= 4 &&
+    else if (vData.size() >= 4 &&
+        vData[0].size() == 1 &&
+        vData[0][0] == OPRETTYPE_STAKEPARAMS &&
+        vData[1].size() <= 4 &&
         vData[2].size() <= 4 &&
         vData[3].size() == sizeof(prevHash) &&
         (vData.size() == STAKE_MINPARAMS || (vData.size() == STAKE_MAXPARAMS && vData[4].size() == 33)))
@@ -1903,11 +1914,11 @@ CStakeParams::CStakeParams(const std::vector<std::vector<unsigned char>> &vData)
         version = VERSION_ORIGINAL;
         for (int i = 0, size = vData[1].size(); i < size; i++)
         {
-            srcHeight = srcHeight | vData[1][i] << (8 * i);
+            srcHeight = srcHeight | (uint32_t)vData[1][i] << (8 * i);
         }
         for (int i = 0, size = vData[2].size(); i < size; i++)
         {
-            blkHeight = blkHeight | vData[2][i] << (8 * i);
+            blkHeight = blkHeight | (uint32_t)vData[2][i] << (8 * i);
         }
 
         prevHash = uint256(vData[3]);

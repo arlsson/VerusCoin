@@ -48,10 +48,12 @@ class CTxMemPoolEntry
 private:
     std::shared_ptr<const CTransaction> tx;
     CAmount nFee;           //! Cached to avoid expensive parent-transaction lookups
+    CAmount nEffectiveFee;  //! adjusted to include delayed rewards
     size_t nTxSize;         //! ... and avoid recomputing tx size
     size_t nModSize;        //! ... and modified size for priority
     size_t nUsageSize;      //! ... and total memory usage
     CFeeRate feeRate;       //! ... and fee per kB
+    CFeeRate effectiveFeeRate; //! ... and effective fee rate per kB
     int64_t nTime;          //! Local time when entering the mempool
     double dPriority;       //! Priority when entering the mempool
     unsigned int nHeight;   //! Chain height when entering the mempool
@@ -63,7 +65,7 @@ private:
 public:
     CTxMemPoolEntry(const CTransaction& _tx, const CAmount& _nFee,
                     int64_t _nTime, double _dPriority, unsigned int _nHeight,
-                    bool poolHasNoInputsOf, bool spendsCoinbase, uint32_t nBranchId, int64_t FeeDelta=0);
+                    bool poolHasNoInputsOf, bool spendsCoinbase, uint32_t nBranchId, int64_t FeeDelta=0, CAmount _nEffectiveFeeDelta=0);
     CTxMemPoolEntry();
     CTxMemPoolEntry(const CTxMemPoolEntry& other);
 
@@ -74,6 +76,7 @@ public:
     void UpdateFeeDelta(int64_t FeeDelta) { feeDelta = FeeDelta; }
     int64_t GetModifiedFee() const { return nFee + feeDelta; }
     CFeeRate GetFeeRate() const { return feeRate; }
+    CFeeRate GetEffectiveFeeRate() const { return effectiveFeeRate; }
     size_t GetTxSize() const { return nTxSize; }
     int64_t GetTime() const { return nTime; }
     unsigned int GetHeight() const { return nHeight; }
@@ -112,6 +115,17 @@ public:
         if (a.GetFeeRate() == b.GetFeeRate())
             return a.GetTime() < b.GetTime();
         return a.GetFeeRate() > b.GetFeeRate();
+    }
+};
+
+class CompareTxMemPoolEntryByEffectiveFee
+{
+public:
+    bool operator()(const CTxMemPoolEntry& a, const CTxMemPoolEntry& b)
+    {
+        if (a.GetEffectiveFeeRate() == b.GetEffectiveFeeRate())
+            return a.GetTime() < b.GetTime();
+        return a.GetEffectiveFeeRate() > b.GetEffectiveFeeRate();
     }
 };
 
@@ -188,6 +202,8 @@ private:
     uint64_t nRecentlyAddedSequence = 0;
     uint64_t nNotifiedSequence = 0;
 
+    std::list<CTransaction> recentlyRemovedTx;
+
     std::map<uint256, const CTransaction*> mapSproutNullifiers;
     std::map<uint256, const CTransaction*> mapSaplingNullifiers;
 
@@ -206,9 +222,21 @@ public:
             boost::multi_index::ordered_non_unique<
                 boost::multi_index::identity<CTxMemPoolEntry>,
                 CompareTxMemPoolEntryByFee
+            >,
+            boost::multi_index::ordered_non_unique<
+                boost::multi_index::identity<CTxMemPoolEntry>,
+                CompareTxMemPoolEntryByEffectiveFee
             >
         >
     > indexed_transaction_set;
+
+    enum {
+        // default 1 gb mempool limit
+        DEFAULT_MAX_MEMPOOL_SIZE = 1024,
+
+        // 72 hour age limit
+        DEFAULT_MEMPOOL_EXPIRY_HOURS = 72
+    };
 
     mutable CCriticalSection cs;
     indexed_transaction_set mapTx;
@@ -250,7 +278,8 @@ public:
     void removeForReorg(const CCoinsViewCache *pcoins, unsigned int nMemPoolHeight, int flags);
     bool checkNameConflicts(const CTransaction &tx, std::list<CTransaction> &conflicting, uint32_t height=0);
     void removeConflicts(const CTransaction &tx, std::list<CTransaction>& removed);
-    void removeExpired(unsigned int nBlockHeight);
+    void removeExpired(unsigned int nBlockHeight, std::list<CTransaction> &removed);
+
     void removeForBlock(const std::vector<CTransaction>& vtx, unsigned int nBlockHeight,
                         std::list<CTransaction>& conflicts, bool fCurrentEstimate = true);
     void removeWithoutBranchId(uint32_t nMemPoolBranchId);
@@ -264,6 +293,15 @@ public:
      * the tx is not dependent on other mempool transactions to be included in a block.
      */
     bool HasNoInputsOf(const CTransaction& tx) const;
+
+    // imports, exports and notarizations: never evicted, never refused for size
+    bool IsProtocolTransaction(const uint256 &hash);
+
+    // Expire entries older than maxAgeSeconds, then evict lowest effective-fee-rate entries
+    // (with their in-mempool descendants) until memory usage is within limitBytes.
+    // Protocol transactions are skipped by both passes. Removed transactions are appended to `removed`.
+    void LimitSize(size_t limitBytes, int64_t maxAgeSeconds, std::list<CTransaction> &removed);
+    void NotifyRemoved(const std::list<CTransaction> &removed);
 
     /** Affect CreateNewBlock prioritisation of transactions */
     void PrioritiseTransaction(const uint256 &hash, const std::string strHash, double dPriorityDelta, const CAmount& nFeeDelta);

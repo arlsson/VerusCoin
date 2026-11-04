@@ -24,7 +24,7 @@
 using namespace std;
 
 CTxMemPoolEntry::CTxMemPoolEntry():
-    nFee(0), nTxSize(0), nModSize(0), nUsageSize(0), nTime(0), dPriority(0.0),
+    nFee(0), nEffectiveFee(0), nTxSize(0), nModSize(0), nUsageSize(0), nTime(0), dPriority(0.0),
     hadNoDependencies(false), spendsCoinbase(false), feeDelta(0)
 {
     nHeight = MEMPOOL_HEIGHT;
@@ -33,8 +33,8 @@ CTxMemPoolEntry::CTxMemPoolEntry():
 CTxMemPoolEntry::CTxMemPoolEntry(const CTransaction& _tx, const CAmount& _nFee,
                                  int64_t _nTime, double _dPriority,
                                  unsigned int _nHeight, bool poolHasNoInputsOf,
-                                 bool _spendsCoinbase, uint32_t _nBranchId, int64_t FeeDelta):
-    tx(std::make_shared<CTransaction>(_tx)), nFee(_nFee), nTime(_nTime), dPriority(_dPriority), nHeight(_nHeight),
+                                 bool _spendsCoinbase, uint32_t _nBranchId, int64_t FeeDelta, CAmount _nEffectiveFeeDelta):
+    tx(std::make_shared<CTransaction>(_tx)), nFee(_nFee), nEffectiveFee(_nFee + _nEffectiveFeeDelta), nTime(_nTime), dPriority(_dPriority), nHeight(_nHeight),
     hadNoDependencies(poolHasNoInputsOf),
     spendsCoinbase(_spendsCoinbase), feeDelta(FeeDelta), nBranchId(_nBranchId)
 {
@@ -42,6 +42,7 @@ CTxMemPoolEntry::CTxMemPoolEntry(const CTransaction& _tx, const CAmount& _nFee,
     nModSize = _tx.CalculateModifiedSize(nTxSize);
     nUsageSize = RecursiveDynamicUsage(*tx) + memusage::DynamicUsage(tx);
     feeRate = CFeeRate(nFee, nTxSize);
+    effectiveFeeRate = CFeeRate(nEffectiveFee, nTxSize);
 }
 
 CTxMemPoolEntry::CTxMemPoolEntry(const CTxMemPoolEntry& other)
@@ -129,7 +130,7 @@ bool CTxMemPool::addUnchecked(const uint256& hash, const CTxMemPoolEntry &entry,
     nRecentlyAddedSequence += 1;
     for (unsigned int i = 0; i < tx.vin.size(); i++)
         mapNextTx[tx.vin[i].prevout] = CInPoint(&tx, i);
-        
+
     BOOST_FOREACH(const JSDescription &joinsplit, tx.vJoinSplit) {
         BOOST_FOREACH(const uint256 &nf, joinsplit.nullifiers) {
             mapSproutNullifiers[nf] = &tx;
@@ -833,7 +834,7 @@ void CTxMemPool::removeConflicts(const CTransaction &tx, std::list<CTransaction>
 int32_t komodo_validate_interest(const CTransaction &tx,int32_t txheight,uint32_t nTime,int32_t dispflag);
 extern char ASSETCHAINS_SYMBOL[];
 
-void CTxMemPool::removeExpired(unsigned int nBlockHeight)
+void CTxMemPool::removeExpired(unsigned int nBlockHeight, std::list<CTransaction> &removed)
 {
     CBlockIndex *tipindex;
     // Remove expired txs and leftover coinbases from the mempool
@@ -849,7 +850,6 @@ void CTxMemPool::removeExpired(unsigned int nBlockHeight)
         }
     }
     for (const CTransaction& tx : transactionsToRemove) {
-        list<CTransaction> removed;
         remove(tx, removed, true);
         LogPrint("mempool", "Removing expired txid: %s\n", tx.GetHash().ToString());
     }
@@ -912,6 +912,7 @@ void CTxMemPool::clear()
     mapReserveTransactions.clear();
     mapDeltas.clear();
     mapRecentlyAddedTx.clear();
+    recentlyRemovedTx.clear();
     mapAddress.clear();
     mapAddressInserted.clear();
     mapSpent.clear();
@@ -1230,6 +1231,69 @@ bool CTxMemPool::HasNoInputsOf(const CTransaction &tx) const
     return true;
 }
 
+bool CTxMemPool::IsProtocolTransaction(const uint256 &hash)
+{
+    LOCK(cs);
+    CReserveTransactionDescriptor rtxd;
+    return IsKnownReserveTransaction(hash, rtxd) && rtxd.IsProtocolTransaction();
+}
+
+void CTxMemPool::LimitSize(size_t limitBytes, int64_t maxAgeSeconds, std::list<CTransaction> &removed)
+{
+    LOCK(cs);
+
+    // 1. age: anything older than the cutoff goes, with its descendants
+    if (maxAgeSeconds > 0)
+    {
+        int64_t cutoff = GetTime() - maxAgeSeconds;
+        std::vector<CTransaction> expired;
+        for (auto it = mapTx.begin(); it != mapTx.end(); it++)
+        {
+            if (it->GetTime() < cutoff && !IsProtocolTransaction(it->GetTx().GetHash()))
+            {
+                expired.push_back(it->GetTx());
+            }
+        }
+        for (auto &tx : expired)
+        {
+            remove(tx, removed, true);      // safe if already removed as a descendant
+        }
+    }
+
+    // 2. size: walk up from the lowest effective fee rate, skipping protocol transactions
+    if (limitBytes == 0)
+    {
+        return;
+    }
+    while (DynamicMemoryUsage() > limitBytes)
+    {
+        const auto &feeIndex = mapTx.get<2>();
+        auto it = feeIndex.rbegin();
+        while (it != feeIndex.rend() && IsProtocolTransaction(it->GetTx().GetHash()))
+        {
+            it++;
+        }
+        if (it == feeIndex.rend())
+        {
+            break;                          // only protocol transactions remain
+        }
+        size_t before = removed.size();
+        CTransaction evict = it->GetTx();   // copy before erasing: remove() invalidates `it`
+        remove(evict, removed, true);
+        if (removed.size() == before)
+        {
+            break;                          // defensive: never spin
+        }
+    }
+}
+
+void CTxMemPool::NotifyRemoved(const std::list<CTransaction> &removed)
+{
+    LOCK(cs);
+    recentlyRemovedTx.insert(recentlyRemovedTx.end(), removed.begin(), removed.end());
+}
+
+
 bool CTxMemPool::nullifierExists(const uint256& nullifier, ShieldedType type) const
 {
     switch (type) {
@@ -1246,6 +1310,7 @@ void CTxMemPool::NotifyRecentlyAdded()
 {
     uint64_t recentlyAddedSequence;
     std::vector<CTransaction> txs;
+    std::list<CTransaction> removedTxes;
     {
         LOCK(cs);
         recentlyAddedSequence = nRecentlyAddedSequence;
@@ -1253,13 +1318,35 @@ void CTxMemPool::NotifyRecentlyAdded()
             txs.push_back(*(kv.second));
         }
         mapRecentlyAddedTx.clear();
+        removedTxes.swap(recentlyRemovedTx);
     }
 
-    // A race condition can occur here between these SyncWithWallets calls, and
-    // the ones triggered by block logic (in ConnectTip and DisconnectTip). It
-    // is harmless because calling SyncWithWallets(_, NULL) does not alter the
-    // wallet transaction's block information.
     for (auto tx : txs) {
+        try {
+            // Hold cs_main across the membership test and the sync so the block path cannot
+            // remove and report this transaction between the two. A transaction no longer in
+            // the pool has already been reported by ConnectTip or DisconnectTip.
+            LOCK(cs_main);
+            {
+                LOCK(cs);
+                if (!exists(tx.GetHash()))
+                {
+                    continue;
+                }
+            }
+            SyncWithWallets(tx, NULL);
+        } catch (const boost::thread_interrupted&) {
+            throw;
+        } catch (const std::exception& e) {
+            PrintExceptionContinue(&e, "CTxMemPool::NotifyRecentlyAdded()");
+        } catch (...) {
+            PrintExceptionContinue(NULL, "CTxMemPool::NotifyRecentlyAdded()");
+        }
+    }
+
+    // Transactions evicted at admission have left the pool, so no membership test. The wallet
+    // sees them as conflicted and refreshes what their inputs and outputs contribute.
+    for (auto &tx : removedTxes) {
         try {
             SyncWithWallets(tx, NULL);
         } catch (const boost::thread_interrupted&) {
@@ -1311,5 +1398,16 @@ bool CCoinsViewMemPool::HaveCoins(const uint256 &txid) const {
 size_t CTxMemPool::DynamicMemoryUsage() const {
     LOCK(cs);
     // Estimate the overhead of mapTx to be 6 pointers + an allocation, as no exact formula for boost::multi_index_contained is implemented.
-    return memusage::MallocUsage(sizeof(CTxMemPoolEntry) + 6 * sizeof(void*)) * mapTx.size() + memusage::DynamicUsage(mapNextTx) + memusage::DynamicUsage(mapDeltas) + memusage::DynamicUsage(mapDeltas) + memusage::DynamicUsage(mapDeltas) + cachedInnerUsage;
+    return memusage::MallocUsage(sizeof(CTxMemPoolEntry) + 6 * sizeof(void*)) * mapTx.size() +
+           memusage::DynamicUsage(mapNextTx) +
+           memusage::DynamicUsage(mapDeltas) +
+           memusage::DynamicUsage(mapReserveTransactions) +
+           memusage::DynamicUsage(mapRecentlyAddedTx) +
+           memusage::DynamicUsage(mapAddress) +
+           memusage::DynamicUsage(mapAddressInserted) +
+           memusage::DynamicUsage(mapSpent) +
+           memusage::DynamicUsage(mapSpentInserted) +
+           memusage::DynamicUsage(mapSproutNullifiers) +
+           memusage::DynamicUsage(mapSaplingNullifiers) +
+           cachedInnerUsage;
 }

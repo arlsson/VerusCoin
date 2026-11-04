@@ -349,7 +349,9 @@ std::string HelpMessage(HelpMessageMode mode)
     strUsage += HelpMessageOpt("-exportdir=<dir>", _("Specify directory to be used when exporting data"));
     strUsage += HelpMessageOpt("-loadblock=<file>", _("Imports blocks from external blk000??.dat file") + " " + _("on startup"));
     strUsage += HelpMessageOpt("-maxorphantx=<n>", strprintf(_("Keep at most <n> unconnectable transactions in memory (default: %u)"), DEFAULT_MAX_ORPHAN_TRANSACTIONS));
-    strUsage += HelpMessageOpt("-mempooltxinputlimit=<n>", _("[DEPRECATED FROM OVERWINTER] Set the maximum number of transparent inputs in a transaction that the mempool will accept (default: 0 = no limit applied)"));
+    //strUsage += HelpMessageOpt("-mempooltxinputlimit=<n>", _("[DEPRECATED FROM OVERWINTER] Set the maximum number of transparent inputs in a transaction that the mempool will accept (default: 0 = no limit applied)"));
+    strUsage += HelpMessageOpt("-maxmempool=<n>", strprintf(_("Megabyte limit to the total size of transactions in the mempool (default: %d, use 0 for unlimited)"), CTxMemPool::DEFAULT_MAX_MEMPOOL_SIZE));
+    strUsage += HelpMessageOpt("-mempoolexpiry=<n>", strprintf(_("Hours after which transactions in the mempool expire, regardless of height expiry (default: %d)"), CTxMemPool::DEFAULT_MEMPOOL_EXPIRY_HOURS));
     strUsage += HelpMessageOpt("-notarydatadir=<dir>", _("Specify data directory for notary chain"));
     strUsage += HelpMessageOpt("-par=<n>", strprintf(_("Set the number of script verification threads (%u to %d, 0 = auto, <0 = leave that many cores free, default: %d)"),
         -(int)boost::thread::hardware_concurrency(), MAX_SCRIPTCHECK_THREADS, DEFAULT_SCRIPTCHECK_THREADS));
@@ -368,7 +370,7 @@ std::string HelpMessage(HelpMessageMode mode)
     strUsage += HelpMessageOpt("-currencyindex", strprintf(_("Maintain a currency balance index for fast reserve currency lookups (default: %u)"), 0));
     strUsage += HelpMessageOpt("-idindex", strprintf(_("Maintain a full identity index, enabling queries to select IDs with addresses, revocation or recovery IDs (default: %u)"), 0));
     strUsage += HelpMessageOpt("-timestampindex", strprintf(_("Maintain a timestamp index for block hashes, used to query blocks hashes by a range of timestamps (default: %u)"), DEFAULT_TIMESTAMPINDEX));
-    if (showDebug)  
+    if (showDebug)
         strUsage += HelpMessageOpt("-txindex", strprintf(_("Maintain a full transaction index, used by the getrawtransaction rpc call (default: %u)"), 1));
     strUsage += HelpMessageOpt("-spentindex", strprintf(_("Maintain a full spent index, used to query the spending txid and input index for an outpoint (default: %u)"), DEFAULT_SPENTINDEX));
     strUsage += HelpMessageGroup(_("Connection options:"));
@@ -479,7 +481,7 @@ std::string HelpMessage(HelpMessageMode mode)
     strUsage += HelpMessageOpt("-logtimestamps", strprintf(_("Prepend debug output with timestamp (default: %u)"), 1));
     if (showDebug)
     {
-        strUsage += HelpMessageOpt("-limitfreerelay=<n>", strprintf("Continuously rate-limit free transactions to <n>*1000 bytes per minute (default: %u)", 15));
+        strUsage += HelpMessageOpt("-limitfreerelay=<n>", strprintf("Continuously rate-limit free transactions to <n>*1000 bytes per minute (default: %u)", 0));
         strUsage += HelpMessageOpt("-relaypriority", strprintf("Require high priority for relaying free or low-fee transactions (default: %u)", 0));
         strUsage += HelpMessageOpt("-maxsigcachesize=<n>", strprintf("Limit size of signature cache to <n> MiB (default: %u)", DEFAULT_MAX_SIG_CACHE_SIZE));
         strUsage += HelpMessageOpt("-maxtipage=<n>", strprintf("Maximum tip age in seconds to consider node in initial block download (default: %u)", DEFAULT_MAX_TIP_AGE));
@@ -497,9 +499,9 @@ std::string HelpMessage(HelpMessageMode mode)
 
     // strUsage += HelpMessageOpt("-shrinkdebugfile", _("Shrink debug.log file on client startup (default: 1 when no -debug)"));
 
-  strUsage += HelpMessageGroup(_("Node relay options:"));
-    strUsage += HelpMessageOpt("-datacarrier", strprintf(_("Relay and mine data carrier transactions (default: %u)"), 1));
-    strUsage += HelpMessageOpt("-datacarriersize", strprintf(_("Maximum size of data in data carrier transactions we relay and mine (default: %u)"), MAX_OP_RETURN_RELAY));
+    // strUsage += HelpMessageGroup(_("Node relay options:"));
+    // strUsage += HelpMessageOpt("-datacarrier", strprintf(_("Relay and mine data carrier transactions (default: %u)"), 1));
+    // strUsage += HelpMessageOpt("-datacarriersize", strprintf(_("Maximum size of data in data carrier transactions we relay and mine (default: %u)"), MAX_OP_RETURN_RELAY));
 
     strUsage += HelpMessageGroup(_("Block creation options:"));
     strUsage += HelpMessageOpt("-blockminsize=<n>", strprintf(_("Set minimum block size in bytes (default: %u)"), 0));
@@ -537,7 +539,7 @@ std::string HelpMessage(HelpMessageMode mode)
     strUsage += HelpMessageOpt("-notificationoracle=<i-address>", strprintf(_("VerusID monitored for network alerts, triggers, and signals. Current default is \"%s\" for Verus and the chain ID for PBaaS chains"), PBAAS_DEFAULT_NOTIFICATION_ORACLE.c_str()));
     strUsage += HelpMessageOpt("-powaveragingwindow=<n>", strprintf(_("Set averaging window for PoW difficulty adjustment, in blocks (default: %d)"), CCurrencyDefinition::DEFAULT_AVERAGING_WINDOW));
     strUsage += HelpMessageOpt("-testnet", _("loads PBaaS network in testmode"));
-	
+
     strUsage += HelpMessageGroup(_("RPC server options:"));
     strUsage += HelpMessageOpt("-server", _("Accept command line and JSON-RPC commands"));
     strUsage += HelpMessageOpt("-rest", strprintf(_("Accept public REST requests (default: %u)"), 0));
@@ -1130,7 +1132,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
 #endif // ENABLE_WALLET
 
     fIsBareMultisigStd = GetBoolArg("-permitbaremultisig", true);
-    nMaxDatacarrierBytes = GetArg("-datacarriersize", nMaxDatacarrierBytes);
+    // nMaxDatacarrierBytes = GetArg("-datacarriersize", nMaxDatacarrierBytes);
 
     fAlerts = GetBoolArg("-alerts", DEFAULT_ALERTS);
 
@@ -1727,7 +1729,7 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
             fReindex = true;
         }
 
-        /* 
+        /*
         pblocktree->ReadFlag("conversionindex", checkval);
         fConversionIndex = GetBoolArg("-conversionindex", checkval);
         if ( checkval != fConversionIndex )
@@ -1996,21 +1998,24 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                 }
 
                 CChainNotarizationData cnd;
-                if (ConnectedChains.FirstNotaryChain().IsValid())
+                CRPCChainData notaryChain = ConnectedChains.FirstNotaryChain();
+                if (notaryChain.IsValid())
                 {
-                    uint160 notaryChainID = ConnectedChains.FirstNotaryChain().GetID();
+                    uint160 notaryChainID = notaryChain.GetID();
                     CNotarySystemInfo &notarySystem = ConnectedChains.notarySystems[notaryChainID];
                     LOCK(cs_main);
-                    if (GetNotarizationData(notaryChainID, cnd) &&
-                        cnd.IsConfirmed() &&
-                        cnd.vtx[cnd.lastConfirmed].second.proofRoots.count(notaryChainID) &&
-                        (!notarySystem.lastConfirmedNotarization.IsValid() ||
-                        !notarySystem.lastConfirmedNotarization.proofRoots.count(notaryChainID) ||
-                        notarySystem.lastConfirmedNotarization.proofRoots[notaryChainID].rootHeight <
-                            cnd.vtx[cnd.lastConfirmed].second.proofRoots[notaryChainID].rootHeight))
+                    if (GetNotarizationData(notaryChainID, cnd))
                     {
-
-                        ConnectedChains.notarySystems[ConnectedChains.FirstNotaryChain().GetID()].lastConfirmedNotarization = cnd.vtx[cnd.lastConfirmed].second;
+                        if (cnd.IsConfirmed() &&
+                            cnd.vtx[cnd.lastConfirmed].second.proofRoots.count(notaryChainID) &&
+                            (!notarySystem.lastConfirmedNotarization.IsValid() ||
+                            !notarySystem.lastConfirmedNotarization.proofRoots.count(notaryChainID) ||
+                            notarySystem.lastConfirmedNotarization.proofRoots[notaryChainID].rootHeight <
+                                cnd.vtx[cnd.lastConfirmed].second.proofRoots[notaryChainID].rootHeight))
+                        {
+                            LOCK(ConnectedChains.cs_mergemining);
+                            ConnectedChains.notarySystems[notaryChainID].lastConfirmedNotarization = cnd.vtx[cnd.lastConfirmed].second;
+                        }
                     }
                 }
 
@@ -2347,6 +2352,10 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         BOOST_FOREACH(const std::string& strFile, GetArgs("-loadblock"))
             vImportFiles.push_back(strFile);
     }
+
+    if (!CheckDiskSpace())
+        return false;
+
     threadGroup.create_thread(boost::bind(&ThreadImport, vImportFiles));
 
     // Wait for genesis block to be processed
@@ -2366,9 +2375,6 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     }
 
     // ********************************************************* Step 11: start node
-
-    if (!CheckDiskSpace())
-        return false;
 
     if (!strErrors.str().empty())
         return InitError(strErrors.str());

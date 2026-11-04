@@ -55,7 +55,6 @@ class CValidationState;
 class PrecomputedTransactionData;
 
 struct CNodeStateStats;
-#define DEFAULT_MEMPOOL_EXPIRY 1
 
 /** Default for -blockmaxsize and -blockminsize, which control the range of sizes the mining code will create **/
 static const unsigned int DEFAULT_BLOCK_MAX_SIZE = MAX_BLOCK_SIZE;
@@ -128,6 +127,9 @@ static const unsigned int INVENTORY_BROADCAST_INTERVAL = 5;
 /** Maximum number of inventory items to send per transmission.
  *  Limits the impact of low-fee transaction floods. */
 static const unsigned int INVENTORY_BROADCAST_MAX = 7 * INVENTORY_BROADCAST_INTERVAL;
+
+/** Number of seconds required between peer mempool requests */
+static const unsigned int MEMPOOL_REQUEST_INTERVAL = 30;
 
 //static const bool DEFAULT_ADDRESSINDEX = false;
 //static const bool DEFAULT_SPENTINDEX = false;
@@ -329,7 +331,7 @@ bool AcceptToMemoryPool(CTxMemPool& pool, CValidationState &state, const CTransa
                         bool* pfMissingInputs, bool fRejectAbsurdFee=false, int dosLevel=-1);
 bool AcceptToMemoryPoolInt(CTxMemPool& pool, CValidationState &state, const CTransaction &tx, bool fLimitFree, bool fLimitDust,
                            bool* pfMissingInputs, bool fRejectAbsurdFee=false, int dosLevel=-1, int32_t simHeight = 0,
-                           int expireThreshold=TX_EXPIRING_SOON_THRESHOLD);
+                           int expireThreshold=TX_EXPIRING_SOON_THRESHOLD, bool fEnforceMempoolLimit=true);
 
 
 struct CNodeStateStats {
@@ -404,7 +406,7 @@ bool CheckTransactionWithoutProofVerification(const CTransaction& tx, CValidatio
 /** Check for standard transaction types
  * @return True if all outputs (scriptPubKeys) use only standard transaction forms
  */
-bool IsStandardTx(const CTransaction& tx, std::string& reason, bool fLimitDust, const CChainParams& chainparams, int nHeight = 0);
+bool IsStandardTx(const CTransaction& tx, std::string& reason, bool fLimitDust, const CChainParams& chainparams, int nHeight = 0, bool fMempoolPolicy = true);
 
 namespace Consensus {
 

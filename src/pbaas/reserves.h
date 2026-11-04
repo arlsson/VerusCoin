@@ -23,10 +23,6 @@
 #include "lrucache.h"
 #include "prevector.h"
 
-#ifndef SATOSHIDEN
-#define SATOSHIDEN ((uint64_t)100000000L)
-#endif
-
 using boost::multiprecision::cpp_dec_float_50;
 class CCoinsViewCache;
 class CInputDescriptor;
@@ -141,7 +137,7 @@ public:
     CTokenOutput(uint32_t ver=VERSION_CURRENT) : nVersion(ver) {}
 
     CTokenOutput(const uint160 &curID, CAmount value) : nVersion(VERSION_CURRENT), reserveValues(std::vector<uint160>({curID}), std::vector<int64_t>({value})) {}
-    CTokenOutput(CCurrencyValueMap values) : nVersion(VERSION_CURRENT), reserveValues(values) {}
+    CTokenOutput(const CCurrencyValueMap &values) : nVersion(VERSION_CURRENT), reserveValues(values) {}
 
     ADD_SERIALIZE_METHODS;
 
@@ -797,7 +793,25 @@ public:
 
     bool IsValid() const
     {
-        return nVersion > VERSION_INVALID && nVersion <= VERSION_LAST && !sourceSystemID.IsNull();
+        if (nVersion > VERSION_INVALID && nVersion <= VERSION_LAST && !sourceSystemID.IsNull())
+        {
+            for (auto &oneCur : totalReserveOutMap.valueMap)
+            {
+                if (!MoneyRange(oneCur.second))
+                {
+                    return false;
+                }
+            }
+            for (auto &oneCur : importValue.valueMap)
+            {
+                if (!MoneyRange(oneCur.second))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+        return false;
     }
 
     bool IsSameChain() const
@@ -1007,13 +1021,10 @@ public:
     enum {
         MIN_BLOCKS = 10,
         MIN_INPUTS = 10,
-        MAX_FEE_INPUTS = 50                         // when we reach 50 or more inputs, we get maximum fees as an exporter
-    };
-
-    enum
-    {
-        MIN_FEES_BEFORE_FEEPOOL = 20000,            // MAX(MIN(this, max avail), RATIO_OF_EXPORT_FEE of export fees) is sent to exporter
+        MAX_FEE_INPUTS = 50,                    // when we reach 50 or more inputs, we get maximum fees as an exporter
+        MIN_FEES_BEFORE_FEEPOOL = 20000,        // MAX(MIN(this, max avail), RATIO_OF_EXPORT_FEE of export fees) is sent to exporter
         RATIO_OF_EXPORT_FEE = 10000000,
+        MAX_PENDING_EXPORTS_PER_PASS = 10
     };
 
     enum EVersions
@@ -1156,15 +1167,43 @@ public:
 
     bool IsValid() const
     {
-        return nVersion >= VERSION_FIRST &&
-               nVersion <= VERSION_LAST &&
-               !sourceSystemID.IsNull() &&
-               (IsSupplemental() ||
-               (!destSystemID.IsNull() &&
-                firstInput >= -1 &&
-                numInputs >= 0 &&
-                numInputs <= (CCurrencyDefinition::MAX_TRANSFER_EXPORTS_PER_BLOCK << 2) &&
-                !destCurrencyID.IsNull()));
+        if (nVersion >= VERSION_FIRST &&
+            nVersion <= VERSION_LAST &&
+            !sourceSystemID.IsNull() &&
+            (IsSupplemental() ||
+             (!destSystemID.IsNull() &&
+              firstInput >= -1 &&
+              numInputs >= 0 &&
+              numInputs <= (CCurrencyDefinition::MAX_TRANSFER_EXPORTS_PER_BLOCK << 2) &&
+              !destCurrencyID.IsNull())))
+        {
+            if (!IsSupplemental())
+            {
+                for (auto &oneCur : totalBurned.valueMap)
+                {
+                    if (!MoneyRange(oneCur.second))
+                    {
+                        return false;
+                    }
+                }
+                for (auto &oneCur : totalAmounts.valueMap)
+                {
+                    if (!MoneyRange(oneCur.second))
+                    {
+                        return false;
+                    }
+                }
+                for (auto &oneCur : totalFees.valueMap)
+                {
+                    if (!MoneyRange(oneCur.second))
+                    {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        }
+        return false;
     }
 
     static CCurrencyValueMap CalculateExportFee(const CCurrencyValueMap &fees, int numIn);
@@ -1453,9 +1492,8 @@ public:
     std::vector<CAmount> ConvertAmounts(const std::vector<CAmount> &inputReserve,       // reserves to convert to fractional
                                         const std::vector<CAmount> &inputFractional,    // fractional to convert to each reserve
                                         CCurrencyState &newState,
-                                        bool promoteExchangeRate,                       // true to compensate for library issue & false to remain compatible with on-chain data
                                         bool layerFixActive,                            // true to enable layer calc fix
-                                        bool enhancedUnderflowCheck,                    // true to enable layer calc fix
+                                        uint32_t height,
                                         CValidationState &validationState,
                                         const std::vector<std::vector<CAmount>> *pCrossConversions=nullptr,
                                         std::vector<CAmount> *pViaPrices=nullptr) const;
@@ -1911,11 +1949,16 @@ public:
     bool IsStorage() const { return IsEvidenceOrStorage() && !(IsImport() || IsNotaryPrioritized()); }
     bool IsIdentityDefinition() const { return flags & IS_IDENTITY_DEFINITION; }
     bool IsHighFee() const { return flags & IS_HIGH_FEE; }
+    bool IsProtocolTransaction() const { return IsValid() && (IsImport() || IsExport() || IsNotaryPrioritized()); }
 
     static CAmount CalculateConversionFee(CAmount inputAmount);
     static CAmount CalculateConversionFeeNoMin(CAmount inputAmount);
     static CAmount CalculateAdditionalConversionFee(CAmount inputAmount);
     static CAmount CalculateAdditionalConversionFeeNoMin(CAmount inputAmount);
+    CAmount CalculateDelayedFees(CAmount &nTotalIn, CCurrencyValueMap &totalReserveIn, uint32_t nHeight,
+                                std::set<CUTXORef> *pOrphanArbs=nullptr,
+                                std::list<CTransaction> *pTxesToRemove=nullptr,
+                                std::map<CUTXORef, uint256> *pArbImports=nullptr) const;   // arb transfer out -> import txid
 
     CAmount TotalNativeOutConverted() const
     {

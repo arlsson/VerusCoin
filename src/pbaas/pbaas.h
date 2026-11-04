@@ -84,7 +84,7 @@ public:
     uint32_t upgradeBlockHeight;            // block height at which the upgrade should happen
     uint32_t upgradeTargetTime;             // target time for upgrade, depending on specific upgrade activation rules
 
-    CUpgradeDescriptor(uint32_t Version=VERSION_INVALID) : version(Version), upgradeBlockHeight(0) {}
+    CUpgradeDescriptor(uint32_t Version=VERSION_INVALID) : version(Version), minDaemonVersion(0), upgradeBlockHeight(0), upgradeTargetTime(0) {}
     CUpgradeDescriptor(const uint160 &UpgradeID, uint32_t MinDaemonVersion, uint32_t UpgradeHeight, uint32_t UpgradeTargetTime, uint32_t Version=VERSION_CURRENT) :
         version(Version), minDaemonVersion(MinDaemonVersion), upgradeID(UpgradeID), upgradeBlockHeight(UpgradeHeight), upgradeTargetTime(UpgradeTargetTime) {}
 
@@ -101,7 +101,12 @@ public:
 
     CUpgradeDescriptor(const std::vector<unsigned char> &asVector)
     {
-        FromVector(asVector, *this);
+        bool success = false;
+        FromVector(asVector, *this, &success);
+        if (!success)
+        {
+            version = VERSION_INVALID;
+        }
     }
 
     CUpgradeDescriptor(const UniValue &uni);
@@ -393,7 +398,12 @@ public:
 
     CPBaaSNotarization(const std::vector<unsigned char> &asVector)
     {
-        ::FromVector(asVector, *this);
+        bool success = false;
+        ::FromVector(asVector, *this, &success);
+        if (!success)
+        {
+            nVersion = VERSION_INVALID;
+        }
     }
 
     CPBaaSNotarization(const CTransaction &tx, int32_t *pOutIdx=nullptr);
@@ -636,6 +646,21 @@ public:
         return rangeSelectKey;
     }
 
+    CTransferDestination ImportProposerFromProof() const
+    {
+        if (proposer.AuxDestCount())
+        {
+            CTransferDestination aux = proposer.GetAuxDest(0);
+            int t = aux.TypeNoFlags();
+            if (t == CTransferDestination::DEST_PK || t == CTransferDestination::DEST_PKH || t == CTransferDestination::DEST_ID)
+            {
+                return aux;
+            }
+        }
+        CTxDestination fallback = TransferDestinationToDestination(proposer);
+        return fallback.which() == COptCCParams::ADDRTYPE_INVALID ? CTransferDestination() : DestinationToTransferDestination(fallback);
+    }
+
     // if false, *this is unmodifed, otherwise, it is set to the last valid notarization in the requested range
     bool GetLastNotarization(const uint160 &currencyID,
                              int32_t startHeight=0,
@@ -683,11 +708,6 @@ public:
     static bool FindFinalizedIndexesByVDXFKey(const uint160 &notarizationIdxKey,
                                               std::vector<CObjectFinalization> &confirmedFinalizations,
                                               std::vector<CAddressIndexDbEntry> &earnedNotarizationIndex);
-
-    bool CheckCrossNotarizationProgression(const CCurrencyDefinition &curDef,
-                                           CPBaaSNotarization &priorNotarization,
-                                           uint32_t newHeight,
-                                           CValidationState &state) const;
 
     // accepts enough information to build a local accepted notarization transaction
     // miner fees are deferred until an import that uses this notarization, in which case
@@ -995,7 +1015,9 @@ public:
 
     // make earned notarizations for one or more notary chains
     std::map<uint160, CNotarySystemInfo> notarySystems;
+    std::map<uint160, CPBaaSNotarization> pendingFinalityCandidates;
     std::set<uint160> idsToRevoke;
+    std::map<CIdentityID, std::set<CKeyID>> pendingKeyRotations;
 
     CCurrencyDefinition thisChain;
     bool readyToStart;
@@ -1014,7 +1036,7 @@ public:
 
     std::map<arith_uint256, CBlockHeader> qualifiedHeaders;
 
-    CCriticalSection cs_mergemining;
+    mutable CCriticalSection cs_mergemining;
     CSemaphore sem_submitthread;
 
     CConnectedChains() :
@@ -1054,6 +1076,11 @@ public:
     void QueueNewBlockHeader(CBlockHeader &bh);
     void SetRevokeID(const CIdentityID &idID);
     CIdentityID NextRevokeID();
+
+    void SetPendingKeyRotation(const CIdentityID &idID, const std::set<CKeyID> &keyIDs);
+    void ClearPendingKeyRotation(const CIdentityID &idID);
+    std::set<CKeyID> GetPendingKeyRotation(const CIdentityID &idID) const;
+
     void QueueEarnedNotarization(CBlock &blk, int32_t txIndex, int32_t height);
     void CheckImports();
     void SignAndCommitImportTransactions(const CTransaction &lastImportTx, const std::vector<CTransaction> &transactions);
@@ -1145,13 +1172,15 @@ public:
                                      const uint160 &sourceSystemID,
                                      const uint160 &destSystemID,
                                      CCurrencyValueMap &newReserveDeposits,
-                                     CCurrencyValueMap &exportBurn);
+                                     CCurrencyValueMap &exportBurn,
+                                     bool enforceNFTBatchCap = true);
 
     static bool CurrencyImportStatus(const CCurrencyValueMap &totalExports,
                                      const uint160 &sourceSystemID,
                                      const uint160 &destSystemID,
                                      CCurrencyValueMap &newReserveDeposits,
-                                     CCurrencyValueMap &exportBurn);
+                                     CCurrencyValueMap &exportBurn,
+                                     bool enforceNFTBatchCap = true);
 
     static std::vector<ChainTransferData> CalcTxInputs(const CCurrencyDefinition &_curDef,
                                                         bool &isClearLaunchExport,
@@ -1187,8 +1216,9 @@ public:
                              std::map<uint160, std::vector<std::pair<int, CTransaction>>> &newImports);
 
     // returns the first notary system, if there is more than one
-    const CRPCChainData &FirstNotaryChain() const
+    const CRPCChainData FirstNotaryChain() const
     {
+        LOCK(cs_mergemining);
         if (notarySystems.size())
         {
             return notarySystems.begin()->second.notaryChain;
@@ -1611,7 +1641,7 @@ CTxOut MakeCC1of2Vout(uint8_t evalcode, CAmount nValue, CPubKey pk1, CPubKey pk2
 bool IsValidExportCurrency(const CCurrencyDefinition &systemDest, const uint160 &exportCurrencyID, uint32_t height);
 std::set<uint160> BaseBridgeCurrencies(const CCurrencyDefinition &systemDest, uint32_t height, bool feeOnly=false);
 std::set<uint160> ValidExportCurrencies(const CCurrencyDefinition &systemDest, uint32_t height);
-
+inline bool TransientError(CValidationState &state, const std::string &reason) { return state.DoS(0, false, REJECT_TRANSIENT, reason); }
 
 // used to export coins from one chain to another, if they are not native, they are represented on the other
 // chain as tokens
@@ -1683,5 +1713,11 @@ bool ImportHasAdequateFees(const CTransaction &tx,
                            const std::vector<CReserveTransfer> &reserveTransfers,
                            CValidationState &state,
                            uint32_t height);
+
+bool IsValidBlockOneCoinbase(const std::vector<CTxOut> &outputs,
+                             const CRPCChainData &launchChain,
+                             const CCurrencyDefinition &newChainCurrency,
+                             CValidationState &state,
+                             bool &knownCapped);
 
 #endif

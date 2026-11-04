@@ -1006,6 +1006,14 @@ void CWallet::SetBestChain(const CBlockLocator& loc)
     SetBestChainINTERNAL(walletdb, loc);
 }
 
+void CWallet::UpdatedBlockTip(const CBlockIndex *pindex)
+{
+    if (needsRescan)
+    {
+        RescanWallet();      // takes its own LOCK2(cs_main, cs_wallet); caller holds nothing
+    }
+}
+
 std::set<std::pair<libzcash::PaymentAddress, uint256>> CWallet::GetNullifiersForAddresses(
         const std::set<libzcash::PaymentAddress> & addresses)
 {
@@ -1767,7 +1775,6 @@ static bool DecrementNoteWitnesses(NoteDataMap& noteDataMap, int indexHeight, in
             assert((nWitnessCacheSize - 1) >= nd->witnesses.size());
         }
     }
-    assert(KOMODO_REWIND != 0 || nWitnessCacheSize > 0);
     return true;
 }
 
@@ -1787,6 +1794,7 @@ void CWallet::DecrementNoteWitnesses(const CBlockIndex* pindex)
         if (nWitnessCacheSize == 0)
         {
             ClearNoteWitnessCache();
+            needsRescan = true;
         }
         //assert(nWitnessCacheSize > 0);
     }
@@ -2150,7 +2158,7 @@ bool CWallet::VerusSelectStakeOutput(CBlock *pBlock, arith_uint256 &hashResult, 
                                         CIdentity destIdentity;
                                         uint32_t idHeight;
                                         if (!(destIdentity = CIdentity::LookupIdentity(GetDestinationID(oneDest), 0, &idHeight)).IsValid() ||
-                                            (nHeight - idHeight) < VERUS_MIN_STAKEAGE)
+                                            (nHeight - idHeight) <= VERUS_MIN_STAKEAGE)
                                         {
                                             if (LogAcceptCategory("staking"))
                                             {
@@ -2227,7 +2235,7 @@ bool CWallet::VerusSelectStakeOutput(CBlock *pBlock, arith_uint256 &hashResult, 
                 pBlock->AddUpdatePBaaSHeader();
 
                 // get map and MMR for stake source transaction
-                CTransactionMap txMap(stakeSource, chainActive[srcIndex]->HasCappedTransactionMap());
+                CTransactionMap txMap(stakeSource, CPartialTransactionProof::CappedTypeFromVersion(chainActive[srcIndex]->PartialTransactionProofVersion()));
                 uint256 txRoot = txMap.GetRoot();
 
                 std::vector<CTransactionComponentProof> txProofVec;
@@ -2763,8 +2771,9 @@ bool CWallet::UpdatedNoteData(const CWalletTx& wtxIn, CWalletTx& wtx)
             if (tmp.count(nd.first) && nd.second.witnesses.size() > 0) {
                 tmp.at(nd.first).witnesses.assign(
                         nd.second.witnesses.cbegin(), nd.second.witnesses.cend());
+                tmp.at(nd.first).witnessHeight = nd.second.witnessHeight;
+                tmp.at(nd.first).nullifier = nd.second.nullifier;
             }
-            tmp.at(nd.first).witnessHeight = nd.second.witnessHeight;
         }
         // Now copy over the updated note data
         wtx.mapSproutNoteData = tmp;
@@ -2779,8 +2788,9 @@ bool CWallet::UpdatedNoteData(const CWalletTx& wtxIn, CWalletTx& wtx)
             if (tmp.count(nd.first) && nd.second.witnesses.size() > 0) {
                 tmp.at(nd.first).witnesses.assign(
                         nd.second.witnesses.cbegin(), nd.second.witnesses.cend());
+                tmp.at(nd.first).witnessHeight = nd.second.witnessHeight;
+                tmp.at(nd.first).nullifier = nd.second.nullifier;
             }
-            tmp.at(nd.first).witnessHeight = nd.second.witnessHeight;
         }
 
         // Now copy over the updated note data
@@ -3671,8 +3681,11 @@ void CWallet::EraseFromWallet(const uint256 &hash)
         return;
     {
         LOCK(cs_wallet);
-        if (mapWallet.erase(hash))
-            CWalletDB(strWalletFile).EraseTx(hash);
+        uint256 hashIn = hash;
+        if (mapWallet.erase(hashIn))
+        {
+            CWalletDB(strWalletFile).EraseTx(hashIn);
+        }
     }
     return;
 }
@@ -3685,6 +3698,7 @@ void CWallet::RescanWallet()
         if (start)
             ScanForWalletTransactions(start, true);
         needsRescan = false;
+        CWalletDB(strWalletFile).WriteNeedsRescan(false);
     }
 }
 
@@ -7079,7 +7093,7 @@ bool CWallet::CreateTransaction(const vector<CRecipient>& vecSend, CWalletTx& wt
                     const CScript& scriptPubKey = coin.first->vout[coin.second].scriptPubKey;
                     SignatureData sigdata;
                     if (sign)
-                        signSuccess = ProduceSignature(TransactionSignatureCreator(this, &txNewConst, nIn, coin.first->vout[coin.second].nValue, scriptPubKey), scriptPubKey, sigdata, consensusBranchId);
+                        signSuccess = ProduceSignature(TransactionSignatureCreator(this, &txNewConst, nIn, coin.first->vout[coin.second].nValue, scriptPubKey, chainActive.Height() + 1), scriptPubKey, sigdata, consensusBranchId);
                     else
                         signSuccess = ProduceSignature(DummySignatureCreator(this), scriptPubKey, sigdata, consensusBranchId);
 

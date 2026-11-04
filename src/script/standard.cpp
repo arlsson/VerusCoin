@@ -25,7 +25,8 @@ typedef vector<unsigned char> valtype;
 
 unsigned nMaxDatacarrierBytes = MAX_OP_RETURN_RELAY;
 
-COptCCParams::COptCCParams(const std::vector<unsigned char> &vch)
+COptCCParams::COptCCParams(const std::vector<unsigned char> &vch, uint8_t v, uint8_t e, uint8_t _m, uint8_t _n) :
+    version(v), evalCode(e), m(_m), n(_n)
 {
     CScript inScr = CScript(vch.begin(), vch.end());
     if (inScr.size() > 1)
@@ -336,8 +337,12 @@ bool Solver(const CScript& scriptPubKey, txnouttype& typeRet, vector<vector<unsi
         mTemplates.insert(make_pair(TX_MULTISIG, CScript() << OP_SMALLINTEGER << OP_PUBKEYS << OP_SMALLINTEGER << OP_CHECKMULTISIG));
 
         // Empty, provably prunable, data-carrying output
-        if (GetBoolArg("-datacarrier", true))
-            mTemplates.insert(make_pair(TX_NULL_DATA, CScript() << OP_RETURN << OP_SMALLDATA));
+        /* {
+            if (GetBoolArg("-datacarrier", true))
+                mTemplates.insert(make_pair(TX_NULL_DATA, CScript() << OP_RETURN << OP_SMALLDATA));
+        } */
+        // replace the following line with the commented block above to reenable this option
+        mTemplates.insert(make_pair(TX_NULL_DATA, CScript() << OP_RETURN << OP_SMALLDATA));
         mTemplates.insert(make_pair(TX_NULL_DATA, CScript() << OP_RETURN));
     }
 
@@ -691,7 +696,7 @@ bool ExtractDestinations(const CScript& scriptPubKey,
                 }
 
                 // handle the case where we have no object in the params, but a valid transaction
-                int loopEnd = p.vData.size() == 1 ? 1 : p.vData.size() - 1;
+                int loopEnd = p.evalCode ? (p.vData.size() == 1 ? 1 : p.vData.size() - 1) : p.vData.size();
                 for (int i = 0; ccValid && i < loopEnd; i++)
                 {
                     // first, process P, then any sub-conditions

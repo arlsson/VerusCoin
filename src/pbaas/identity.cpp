@@ -20,11 +20,6 @@
 #include "txdb.h"
 
 extern CTxMemPool mempool;
-bool IsValidBlockOneCoinbase(const std::vector<CTxOut> &outputs,
-                            const CRPCChainData &launchChain,
-                            const CCurrencyDefinition &newChainCurrency,
-                            CValidationState &state,
-                            bool &knownCapped);
 
 CCommitmentHash::CCommitmentHash(const CTransaction &tx)
 {
@@ -1106,7 +1101,7 @@ bool ValidateSpendingIdentityReservation(const CTransaction &tx, int32_t outNum,
         {
             CIdentity signingID = CIdentity::LookupIdentity(parentID, height);
 
-            if (!signingID.IsValid())
+            if (!signingID.IsValidUnrevoked())
             {
                 return state.Error("Invalid identity or identity not found for currency mint or burn with weight change");
             }
@@ -2004,7 +1999,8 @@ bool PrecheckIdentityReservation(const CTransaction &tx, int32_t outNum, CValida
                         (((chainActive.ChainTimeAtOrBefore(height - 1) < PBAAS_PREMAINNET_ACTIVATION ||
                            burnSet.count(newIdentity.GetID())) &&
                           newIdentity.name == CleanName(newIdentity.name, dummyParent)) ||
-                         newIdentity.name == CleanName(newIdentity.name, dummyParent, true)) &&
+                         newIdentity.name == CleanName(newIdentity.name, dummyParent, true) &&
+                         HasOnlyUnicodeScalarValues(newIdentity.name)) &&
                         (advNewName.IsValid() ?
                            newIdentity.parent == advNewName.parent :
                            (newIdentity.parent == ASSETCHAINS_CHAINID ||
@@ -2178,10 +2174,19 @@ bool PrecheckIdentityReservation(const CTransaction &tx, int32_t outNum, CValida
 
     if (advancedIdentity)
     {
+        if (IsAfterSecondBridgeCleanupWindowStarts(chainActive.ChainTimeAtOrBefore(height - 1)) &&
+            newIdentity.name.find('\0') != std::string::npos)
+        {
+            return state.Error("Invalid name characters specified in identity registration");
+        }
         cleanName = CleanName(newIdentity.name, parentID, isPBaaS, false);
         if (cleanName.empty())
         {
             return state.Error("Invalid name characters specified in identity registration");
+        }
+        if (!HasOnlyUnicodeScalarValues(cleanName))
+        {
+            return state.Error("Invalid, non-unicode scalar name characters specified in identity registration");
         }
         std::vector<unsigned char> base58Vec;
         if (DecodeBase58Check(cleanName, base58Vec) && base58Vec.size() > 20)
@@ -2528,6 +2533,14 @@ bool PrecheckIdentityPrimary(const CTransaction &tx, int32_t outNum, CValidation
                          ::AsVector(checkIdentity) != p.vData[0]))
                     {
                         return state.Error("Invalid identity on transaction output " + std::to_string(i));
+                    }
+
+                    if (IsAfterSecondBridgeCleanupWindowStarts(chainActive.ChainTimeAtOrBefore(height - 1)) &&
+                        !checkIdentity.HasTokenizedControl() &&
+                        checkIdentity.IsRevoked() &&
+                        checkIdentity.recoveryAuthority == checkIdentity.GetID())
+                    {
+                        return state.Error("Irrecoverable identity on new transaction output " + std::to_string(i));
                     }
 
                     if (isPBaaS && isInSync)
@@ -2925,14 +2938,15 @@ bool PrecheckIdentityPrimary(const CTransaction &tx, int32_t outNum, CValidation
                     if (i == outNum)
                     {
                         bool knownCapped = false;
-                        if (ConnectedChains.FirstNotaryChain().IsValid() &&
-                            IsValidBlockOneCoinbase(tx.vout, ConnectedChains.FirstNotaryChain(), ConnectedChains.ThisChain(), state, knownCapped))
+                        const CRPCChainData notaryChain = ConnectedChains.FirstNotaryChain();
+                        if (notaryChain.IsValid() &&
+                            IsValidBlockOneCoinbase(tx.vout, notaryChain, ConnectedChains.ThisChain(), state, knownCapped))
                         {
                             return true;
                         }
                         else
                         {
-                            return state.Error("Invalid block 1 coinbase");
+                            return false;
                         }
                     }
                     else
@@ -3330,6 +3344,12 @@ bool ValidateIdentityRecover(struct CCcontract_info *cp, Eval* eval, const CTran
             CIdentity recoveryIdentity = oldIdentity.recoveryAuthority == identityID ? oldIdentity : CIdentity::LookupIdentity(oldIdentity.recoveryAuthority, height);
             CIdentity revocationIdentity = oldIdentity.revocationAuthority == identityID ? oldIdentity : CIdentity::LookupIdentity(oldIdentity.revocationAuthority, height);
 
+            bool heightLocking = IsAfterSecondBridgeCleanupWindowStarts(chainActive.ChainTimeAtOrBefore(height));
+            bool recoveryUsable = recoveryIdentity.IsValidUnrevoked() &&
+                                (oldIdentity.recoveryAuthority == identityID || !(heightLocking ? recoveryIdentity.IsLocked(height - 1) : recoveryIdentity.IsLocked()));
+            bool revocationUsable = revocationIdentity.IsValidUnrevoked() &&
+                                    (oldIdentity.revocationAuthority == identityID || !(heightLocking ? revocationIdentity.IsLocked(height - 1) : revocationIdentity.IsLocked()));
+
             std::set<CTxDestination> recoverySigDests = recoveryIdentity.IdentityPrimaryAddressKeySet();
             std::set<CTxDestination> revocationSigDests = revocationIdentity.IdentityPrimaryAddressKeySet();
             std::set<CTxDestination> primarySigDests = oldIdentity.IdentityPrimaryAddressKeySet();
@@ -3344,11 +3364,11 @@ bool ValidateIdentityRecover(struct CCcontract_info *cp, Eval* eval, const CTran
                 {
                     CPubKey thisKey;
                     thisKey.Set(keySig.second.pubKeyData.begin(), keySig.second.pubKeyData.end());
-                    if (recoveryIdentity.IsValid() && recoverySigDests.count(thisKey.GetID()))
+                    if (recoveryUsable && recoverySigDests.count(thisKey.GetID()))
                     {
                         recSigsValid++;
                     }
-                    if (revocationIdentity.IsValid() && revocationSigDests.count(thisKey.GetID()))
+                    if (revocationUsable && revocationSigDests.count(thisKey.GetID()))
                     {
                         revSigsValid++;
                     }
@@ -3357,12 +3377,12 @@ bool ValidateIdentityRecover(struct CCcontract_info *cp, Eval* eval, const CTran
                         priSigsValid++;
                     }
                 }
-                if (!recoveryIdentity.IsValid() || recSigsValid < recoveryIdentity.minSigs)
+                if (!recoveryUsable || recSigsValid < recoveryIdentity.minSigs)
                 {
                     fulfilled = false;
                 }
                 // one of the three authorities must be satisfied if no token fulfilled, or we should fail
-                if ((!revocationIdentity.IsValid() || revSigsValid < revocationIdentity.minSigs) && priSigsValid < oldIdentity.minSigs)
+                if ((!revocationUsable || revSigsValid < revocationIdentity.minSigs) && priSigsValid < oldIdentity.minSigs)
                 {
                     return eval->Error("Neither valid authority signature nor token authorization for ID update");
                 }
@@ -3567,7 +3587,7 @@ bool ValidateIdentityCommitment(struct CCcontract_info *cp, Eval* eval, const CT
     {
         printf("%s: error getting transaction %s to spend\n", __func__, spendingTx.vin[nIn].prevout.hash.GetHex().c_str());
         LogPrintf("%s: error getting transaction %s to spend\n", __func__, spendingTx.vin[nIn].prevout.hash.GetHex().c_str());
-        return false;
+        return eval->Invalid("cannot get transaction to spend for identity commitment");
     }
 
     return true;

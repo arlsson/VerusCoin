@@ -113,9 +113,11 @@ UniValue getinfo(const UniValue& params, bool fHelp)
     obj.push_back(Pair("version", CLIENT_VERSION));
     obj.push_back(Pair("protocolversion", PROTOCOL_VERSION));
     obj.push_back(Pair("chainid", EncodeDestination(CIdentityID(ASSETCHAINS_CHAINID))));
-    if (ConnectedChains.FirstNotaryChain().IsValid())
+
+    CRPCChainData notaryChain = ConnectedChains.FirstNotaryChain();
+    if (notaryChain.IsValid())
     {
-        obj.push_back(Pair("notarychainid", EncodeDestination(CIdentityID(ConnectedChains.FirstNotaryChain().GetID()))));
+        obj.push_back(Pair("notarychainid", EncodeDestination(CIdentityID(notaryChain.GetID()))));
     }
     obj.push_back(Pair("name", ConnectedChains.GetFriendlyCurrencyName(ASSETCHAINS_CHAINID)));
     if (confirmedRoot.IsValid())
@@ -875,7 +877,7 @@ CIdentitySignature::ESignatureVerification CheckBasicIDSignature(uint256 msgHash
         signature = CIdentitySignature();
     }
 
-    if (signature.signatures.size())
+    if (signature.IsValid() && signature.signatures.size())
     {
         if (msgHash.IsNull())
         {
@@ -959,8 +961,11 @@ UniValue verifyhash(const UniValue& params, bool fHelp)
             "1. \"t-addr or identity\" (string, required) The transparent address or identity that signed the data.\n"
             "2. \"signature\"       (string, required) The signature provided by the signer in base 64 encoding (see signmessage/signfile).\n"
             "3. \"hexhash\"         (string, required) Hash of the message or file that was signed.\n"
-            "3. \"checklatest\"     (bool, optional)   If true, checks signature validity based on latest identity. defaults to false,\n"
-            "                                          which determines validity of signing height stored in signature.\n"
+            "4. \"checklatest\"     (bool, optional)   Default false: verifies against the identity's primary addresses as they were at the\n"
+            "                                          block height recorded inside the signature, so the result proves that the keys which\n"
+            "                                          controlled the identity at that height produced it; a signature made with former keys,\n"
+            "                                          or before a revocation, still verifies. True: verifies against the identity's current\n"
+            "                                          primary addresses and fails if it can no longer be verified with the active addresses.\n"
             "\nResult:\n"
             "true|false   (boolean) If the signature is verified or not.\n"
             "\nExamples:\n"
@@ -1047,8 +1052,11 @@ UniValue verifymessage(const UniValue& params, bool fHelp)
             "1. \"t-addr or identity\" (string, required) The transparent address or identity that signed the message.\n"
             "2. \"signature\"       (string, required) The signature provided by the signer in base 64 encoding (see signmessage).\n"
             "3. \"message\"         (string, required) The message that was signed.\n"
-            "3. \"checklatest\"     (bool, optional)   If true, checks signature validity based on latest identity. defaults to false,\n"
-            "                                          which determines validity of signing height stored in signature.\n"
+            "4. \"checklatest\"     (bool, optional)   Default false: verifies against the identity's primary addresses as they were at the\n"
+            "                                          block height recorded inside the signature, so the result proves that the keys which\n"
+            "                                          controlled the identity at that height produced it; a signature made with former keys,\n"
+            "                                          or before a revocation, still verifies. True: verifies against the identity's current\n"
+            "                                          primary addresses and fails if it can no longer be verified with the active addresses.\n"
             "\nResult:\n"
             "true|false   (boolean) If the signature is verified or not.\n"
             "\nExamples:\n"
@@ -1129,8 +1137,11 @@ UniValue verifyfile(const UniValue& params, bool fHelp)
             "1. \"t-addr or identity\" (string, required) The transparent address or identity that signed the file.\n"
             "2. \"signature\"       (string, required) The signature provided by the signer in base 64 encoding (see signfile).\n"
             "3. \"filename\"        (string, required) The file, which must be available locally to the daemon and that was signed.\n"
-            "3. \"checklatest\"     (bool, optional)   If true, checks signature validity based on latest identity. defaults to false,\n"
-            "                                          which determines validity of signing height stored in signature.\n"
+            "4. \"checklatest\"     (bool, optional)   Default false: verifies against the identity's primary addresses as they were at the\n"
+            "                                          block height recorded inside the signature, so the result proves that the keys which\n"
+            "                                          controlled the identity at that height produced it; a signature made with former keys,\n"
+            "                                          or before a revocation, still verifies. True: verifies against the identity's current\n"
+            "                                          primary addresses and fails if it can no longer be verified with the active addresses.\n"
             "\nResult:\n"
             "true|false   (boolean) If the signature is verified or not.\n"
             "\nExamples:\n"
@@ -1234,8 +1245,11 @@ UniValue verifysignature(const UniValue& params, bool fHelp)
             "  \"boundhashes\":[\"hexhash\", ...],                              (array, optional)  Array of bound hash values\n"
             "  \"hashtype\"                                                     (string, optional) one of: \"sha256\", \"sha256D\", \"blake2b\", \"keccak256\", defaults to sha256\n"
             "  \"signature\"                                                    (string, optional) The current signature of the message encoded in base 64\n"
-            "  \"checklatest\"                                                  (bool, optional)   If true, checks signature validity based on latest identity. defaults to false,\n"
-            "                                                                                      which determines validity of signing height stored in signature.\n"
+            "  \"checklatest\"     (bool, optional)    Default false: verifies against the identity's primary addresses as they were at the\n"
+            "                                          block height recorded inside the signature, so the result proves that the keys which\n"
+            "                                          controlled the identity at that height produced it; a signature made with former keys,\n"
+            "                                          or before a revocation, still verifies. True: verifies against the identity's current\n"
+            "                                          primary addresses and fails if it can no longer be verified with the active addresses.\n"
             "}\n"
 
             "\nResult:\n"
@@ -1319,10 +1333,9 @@ UniValue verifysignature(const UniValue& params, bool fHelp)
     if (dest.which() != COptCCParams::ADDRTYPE_ID &&
         ((vdxfKeys.isArray() && vdxfKeys.size()) ||
             (vdxfKeyNames.isArray() && vdxfKeyNames.size()) ||
-            (boundHashes.isArray() && vdxfKeyNames.size()) ||
-            strSignature.size()))
+            (boundHashes.isArray() && boundHashes.size())))
     {
-        throw JSONRPCError(RPC_INVALID_PARAMETER, "When signing with public key and not identity, cannot include vdxf keys, vdxf key names, bound hashes, or multisig");
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "When signing with public key and not identity, cannot include vdxf keys, vdxf key names, or bound hashes");
     }
 
     uint256 msgHash;
@@ -1402,47 +1415,61 @@ UniValue verifysignature(const UniValue& params, bool fHelp)
 
         uint32_t nHeight = chainActive.Height();
 
-        CIdentity identity;
-
-        identity = CIdentity::LookupIdentity(GetDestinationID(dest));
-        if (identity.IsValidUnrevoked())
+        CIdentitySignature identitySig = CIdentitySignature(nHeight, std::vector<unsigned char>(), hashType, CIdentitySignature::VERSION_ETHBRIDGE);
+        if (!strSignature.empty())
         {
-            UniValue ret(UniValue::VOBJ);
-
-            CIdentitySignature identitySig = CIdentitySignature(nHeight, std::vector<unsigned char>(), hashType, CIdentitySignature::VERSION_ETHBRIDGE);
-            if (!strSignature.empty())
+            std::vector<unsigned char> sigVec;
+            try
             {
-                std::vector<unsigned char> sigVec;
-                try
-                {
-                    bool fInvalid = false;
-                    sigVec = DecodeBase64(strSignature.c_str(), &fInvalid);
-                    if (fInvalid)
-                    {
-                        sigVec.clear();
-                    }
-                    if (sigVec.size())
-                    {
-                        identitySig = CIdentitySignature(sigVec);
-                        if (!identitySig.IsValid() || identitySig.blockHeight > (nHeight + 1))
-                        {
-                            sigVec.clear();
-                        }
-                    }
-                }
-                catch(const std::exception& e)
+                bool fInvalid = false;
+                sigVec = DecodeBase64(strSignature.c_str(), &fInvalid);
+                if (fInvalid)
                 {
                     sigVec.clear();
                 }
-                if (!sigVec.size())
+                if (sigVec.size())
                 {
-                    throw JSONRPCError(RPC_INVALID_PARAMS, "Invalid pre-existing signature");
+                    identitySig = CIdentitySignature(sigVec);
+                    if (!identitySig.IsValid() || identitySig.blockHeight > (nHeight + 1))
+                    {
+                        sigVec.clear();
+                    }
                 }
             }
-            else
+            catch(const std::exception& e)
             {
-                throw JSONRPCError(RPC_INVALID_PARAMS, "Missing or invalid \"signature\"");
+                sigVec.clear();
             }
+            if (!sigVec.size())
+            {
+                throw JSONRPCError(RPC_INVALID_PARAMS, "Invalid pre-existing signature");
+            }
+        }
+        else
+        {
+            throw JSONRPCError(RPC_INVALID_PARAMS, "Missing or invalid \"signature\"");
+        }
+
+        CIdentity identity;
+
+        // default verifies against the identity as it was at the height recorded in the signature,
+        // as verifyhash, verifymessage and verifyfile do; checklatest uses the current identity
+        if (!checkLatest)
+        {
+            identity = CIdentity::LookupIdentity(GetDestinationID(dest), identitySig.blockHeight);
+            if (!identity.IsValidUnrevoked())
+            {
+                throw JSONRPCError(RPC_INVALID_PARAMS, "Identity was not valid at the signature's block height");
+            }
+        }
+        else
+        {
+            identity = CIdentity::LookupIdentity(GetDestinationID(dest));
+        }
+
+        if (identity.IsValidUnrevoked())
+        {
+            UniValue ret(UniValue::VOBJ);
 
             // go through VDXF keys, VDXF key names, and bound hashes
             std::vector<uint160> vdxfCodes;
@@ -1558,7 +1585,7 @@ UniValue verifysignature(const UniValue& params, bool fHelp)
         }
         else
         {
-            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Identity is revoked and cannot sign");
+            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Identity is revoked and signature cannot be validated");
         }
     }
     else
@@ -1566,11 +1593,6 @@ UniValue verifysignature(const UniValue& params, bool fHelp)
         const CKeyID *keyID = boost::get<CKeyID>(&dest);
         if (!keyID) {
             throw JSONRPCError(RPC_TYPE_ERROR, "Address does not refer to key");
-        }
-
-        CKey key;
-        if (!pwalletMain->GetKey(*keyID, key)) {
-            throw JSONRPCError(RPC_WALLET_ERROR, "Private key not available");
         }
 
         CHashWriterSHA256 ss(SER_GETHASH, PROTOCOL_VERSION);
@@ -2251,7 +2273,7 @@ UniValue getaddressdeltas(const UniValue& params, bool fHelp)
                     {
                         const CScript &scriptPubKey = curTx.vout[it->first.index].scriptPubKey;
                         COptCCParams p;
-                        
+
                         if (scriptPubKey.IsPayToCryptoCondition(p) && p.IsValid())
                         {
                             // VDXF tags are stored in the master COptCCParams vKeys array (last element of vData)
@@ -2273,7 +2295,7 @@ UniValue getaddressdeltas(const UniValue& params, bool fHelp)
                                 }
                             }
                         }
-                        
+
                         // Skip this output if it doesn't have the matching tag
                         if (!outputHasTag)
                         {
@@ -2588,6 +2610,7 @@ UniValue generateadjustmentreport(const UniValue& params, bool fHelp)
 			    "\nArguments:\n"
 			    "  \"{\"                        (object, required) Adjustement data object\n"
                 "      \"currencyadjustments\": {\"currencyname\":fractionofsatoshi,..},\n"
+                "      \"restitutionconversions\": {\"currencyname\":conversionratetorestitutioncurrency,..},\n"
                 "      \"currencydefinitions\": [{currencydefinition},..],              \n"
                 "      \"currencystates\":      [{currencystate},..],                   \n"
                 "      \"adjustingaddresses\":  {\"chainid\":\"address\",...},          \n"
@@ -2595,6 +2618,7 @@ UniValue generateadjustmentreport(const UniValue& params, bool fHelp)
                 "      \"offchaintransactions\": [\"hextx\",...],         \n"
                 "      \"allfundedtransactions\": [\"hextx\",...],         \n"
                 "      \"sendtransactions\":    bool - default false, sends transactions if funded and signed\n"
+                "      \"currencyreportonly\":  bool - default false, do not run full report and only output currencies and states\n"
 			    "  \"}\"\n"
 			    "\nResult:\n"
 			    "{\n"
@@ -2626,6 +2650,7 @@ UniValue generateadjustmentreport(const UniValue& params, bool fHelp)
     }
 
     UniValue currencyAdjustmentsUni = find_value(params[0], "currencyadjustments");
+    UniValue restitutionConversionsUni = find_value(params[0], "restitutionconversions");
     UniValue currenciesUni = find_value(params[0], "currencydefinitions");
     UniValue currencyStatesUni = find_value(params[0], "currencystates");
     UniValue adjustingDestinationsUni = find_value(params[0], "adjustingaddresses");
@@ -2633,15 +2658,17 @@ UniValue generateadjustmentreport(const UniValue& params, bool fHelp)
     UniValue offChainTransactionsUni = find_value(params[0], "offchaintransactions");
     UniValue fundedTransactionsUni = find_value(params[0], "allfundedtransactions");
     bool sendTransactions = uni_get_bool(find_value(params[0], "sendtransactions"));
+    bool currencyReportOnly = uni_get_bool(find_value(params[0], "currencyreportonly"));
 
     if (!currencyAdjustmentsUni.isObject() ||
+        !restitutionConversionsUni.isObject() ||
         !(currenciesUni.isArray() && currenciesUni.size() != 0 && currenciesUni[0].isObject()) ||
         !(currencyStatesUni.isArray() && currencyStatesUni.size() != 0 && currencyStatesUni[0].isObject()) ||
         !adjustingDestinationsUni.isObject() ||
         !chainExpiriesUni.isObject() ||
         (!offChainTransactionsUni.isNull() && !offChainTransactionsUni.isArray()))
     {
-        throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter. Must include currencyadjustments {}, currencydefinitions [], currencystates [], adjustingaddresses {}, and expirybychain {}.");
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter. Must include currencyadjustments {}, restitutionconversions {}, currencydefinitions [], currencystates [], adjustingaddresses {}, and expirybychain {}.");
     }
 
     std::vector<CMutableTransaction> offChainTransactions;
@@ -2677,6 +2704,23 @@ UniValue generateadjustmentreport(const UniValue& params, bool fHelp)
             throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter. currencyadjustments must specify each adjusting valid currency and non-0 value fraction to reduce.");
         }
         currencyAdjustments.valueMap[curID] = nValue;
+    }
+
+    CCurrencyValueMap restitutionConversions;
+    for (auto oneKey : restitutionConversionsUni.getKeys())
+    {
+        uint160 curID = ValidateCurrencyName(oneKey);
+        CAmount nValue = AmountFromValueNoErr(find_value(restitutionConversionsUni, oneKey));
+        if (curID.IsNull() || nValue == 0)
+        {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter. restitutionconversions must specify each adjusting valid currency and non-0 value as a conversion rate to restitution.");
+        }
+        restitutionConversions.valueMap[curID] = nValue;
+    }
+    if (currencyAdjustments.valueMap.size() != restitutionConversions.valueMap.size() ||
+        currencyAdjustments.valueMap.size() != restitutionConversions.IntersectingValues(currencyAdjustments).valueMap.size())
+    {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter. restitutionconversions must include conversion rates for all currencies in currencyadjustments.");
     }
 
     std::map<uint160,CCurrencyDefinition> crossChainCurrencies;
@@ -2727,13 +2771,15 @@ UniValue generateadjustmentreport(const UniValue& params, bool fHelp)
 
     LOCK(cs_main);
     return pblocktree->GenerateAdjustmentTransactions(currencyAdjustments,
+                                                      restitutionConversions,
                                                       crossChainCurrencies,
                                                       crossChainCurrencyStates,
                                                       adjustingDestinations,
                                                       expiryForAllChains,
                                                       offChainTransactions,
                                                       fundedTransactionsToSign,
-                                                      sendTransactions);
+                                                      sendTransactions,
+                                                      currencyReportOnly);
 }
 
 UniValue getaddresstxids(const UniValue& params, bool fHelp)

@@ -34,6 +34,8 @@
 using namespace std;
 
 extern void TxToJSON(const CTransaction& tx, const uint256 hashBlock, UniValue& entry);
+extern int32_t KOMODO_REWIND;
+
 int32_t komodo_longestchain();
 
 double GetDifficultyINTERNAL(const CBlockIndex* blockindex, bool networkDifficulty)
@@ -1489,9 +1491,6 @@ UniValue gettxout(const UniValue& params, bool fHelp)
         ret.push_back(Pair("confirmations", 0));
     else ret.push_back(Pair("confirmations", pindex->GetHeight() - coins.nHeight + 1));
     ret.push_back(Pair("value", ValueFromAmount(coins.vout[n].nValue)));
-    uint64_t interest; int32_t txheight; uint32_t locktime;
-    if ( (interest= komodo_accrued_interest(&txheight,&locktime,hash,n,coins.nHeight,coins.vout[n].nValue,(int32_t)pindex->GetHeight())) != 0 )
-        ret.push_back(Pair("interest", ValueFromAmount(interest)));
     UniValue o(UniValue::VOBJ);
     ScriptPubKeyToJSON(coins.vout[n].scriptPubKey, o, true);
     ret.push_back(Pair("scriptPubKey", o));
@@ -1885,12 +1884,28 @@ UniValue invalidateblock(const UniValue& params, bool fHelp)
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Block not found");
 
         CBlockIndex* pblockindex = mapBlockIndex[hash];
-        InvalidateBlock(state, Params(), pblockindex);
+        int32_t savedRewind = KOMODO_REWIND;
+        if (chainActive.Height() > pblockindex->GetHeight() &&
+            (chainActive.Height() - pblockindex->GetHeight()) > MAX_REORG_LENGTH)
+        {
+            KOMODO_REWIND = pblockindex->GetHeight() - 1;
+        }
+        if (!InvalidateBlock(state, Params(), pblockindex))
+        {
+            KOMODO_REWIND = savedRewind;
+        }
     }
 
     if (state.IsValid()) {
         ActivateBestChain(state, Params());
     }
+
+#ifdef ENABLE_WALLET
+    if (pwalletMain && pwalletMain->needsRescan)
+    {
+        pwalletMain->RescanWallet();
+    }
+#endif
 
     if (!state.IsValid()) {
         throw JSONRPCError(RPC_DATABASE_ERROR, state.GetRejectReason());
